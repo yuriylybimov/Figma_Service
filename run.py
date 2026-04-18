@@ -96,6 +96,72 @@ def _trim(s: str | None, n: int = 2000) -> str | None:
     return s if len(s) <= n else s[:n] + f"… (+{len(s) - n}B truncated)"
 
 
+def _read_code_source(code: str | None, code_file: str | None) -> str:
+    """Resolve --code / --code-file into a JS string. Raises _BridgeError on failure."""
+    if (code is None) == (code_file is None):
+        # Both None or both set — misuse.
+        raise _BridgeError(
+            "input_read_failed",
+            "exactly one of --code or --code-file is required",
+            detail="path=<none> error=ArgError: exactly one of --code/--code-file must be set",
+        )
+    if code is not None:
+        return code
+    # code_file branch
+    if code_file == "-":
+        if sys.stdin.isatty():
+            raise _BridgeError(
+                "input_read_failed",
+                "refusing to read code from interactive TTY",
+                detail="path=- error=RefuseTTY: refusing to read code from interactive TTY; pipe input or use --code",
+            )
+        try:
+            return sys.stdin.read()
+        except Exception as e:
+            raise _BridgeError(
+                "input_read_failed",
+                f"stdin read failed: {e}",
+                detail=f"path=- error={type(e).__name__}: {e}",
+            ) from e
+    try:
+        return Path(code_file).read_text(encoding="utf-8")
+    except (FileNotFoundError, PermissionError, IsADirectoryError, UnicodeDecodeError) as e:
+        raise _BridgeError(
+            "input_read_failed",
+            f"cannot read --code-file: {e}",
+            detail=f"path={code_file} error={type(e).__name__}: {e}",
+        ) from e
+
+
+def _atomic_write(path: Path, payload: bytes) -> None:
+    """Atomic, mode-0o600 write. Raises _BridgeError(kind='output_write_failed') on any stage failure."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    stage = "open"
+    try:
+        with open(tmp, "wb") as f:
+            stage = "write"
+            f.write(payload)
+            stage = "fsync"
+            f.flush()
+            os.fsync(f.fileno())
+        stage = "chmod"
+        os.chmod(tmp, 0o600)
+        stage = "rename"
+        os.replace(tmp, path)
+    except Exception as e:
+        # Clean up any partial tmp so we don't leak it.
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+        raise _BridgeError(
+            "output_write_failed",
+            f"atomic write failed at stage {stage}: {e}",
+            detail=f"path={path} stage={stage} error={type(e).__name__}: {e}",
+        ) from e
+
+
 def _scripter_frame(page: Page, timeout_s: float = 30) -> Frame:
     """Find the Scripter iframe and wait for Monaco to mount."""
     deadline = time.monotonic() + timeout_s
