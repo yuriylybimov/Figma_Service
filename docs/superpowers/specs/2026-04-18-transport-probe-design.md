@@ -56,11 +56,11 @@ Host computes expected chunk count from the requested `bytes` (UTF-8 length = ba
 
 | Dimension     | Values                           |
 |---------------|----------------------------------|
-| `bytes`       | 1_000, 4_000, 16_000, 32_000, 65_000 |
+| `bytes`       | 1_000, 4_000, 16_000, 32_000     |
 | `delay_ms`    | 0, 25, 100, 250, 500             |
 | `runs` / cell | 3                                |
 
-**Total:** 75 runs. Matrix is tunable via CLI flags so we can narrow after the first pass.
+**Total:** 60 runs. Matrix is tunable via CLI flags. Intentionally narrower than the full Phase-1.5 cap (`EXEC_CAP_BYTES=65536`) — expand to 65_000 only after the lower cells are characterized, since if the channel is already flaky at 32_000 we don't need to pay for the top cell to know it will be worse.
 
 ### CSV output
 
