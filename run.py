@@ -31,12 +31,9 @@ PROFILE_DIR = Path(os.environ.get("PROFILE_DIR", "./profile")).resolve()
 FIGMA_LOGIN_URL = "https://www.figma.com/login"
 
 PROTOCOL_VERSION = 2
-SENTINEL = "__FS::"         # legacy alias; kept so log messages read naturally
-CLOSING = "::SF__"          # legacy alias; same reason
-SENTINEL_PREFIX = SENTINEL  # v2 canonical name
-SENTINEL_CLOSING = CLOSING
-PAYLOAD_CAP_BYTES = 500     # exec-inline hard cap (UTF-8 bytes of the full status doc)
-INLINE_CAP_BYTES = PAYLOAD_CAP_BYTES  # v2 alias used in wrapper substitution
+SENTINEL_PREFIX = "__FS::"
+SENTINEL_CLOSING = "::SF__"
+INLINE_CAP_BYTES = 500      # exec-inline hard cap (UTF-8 bytes of the full status doc)
 CHUNK_B64_BYTES = 2048      # 2 KB base64 per C:<i> toast
 
 _QUIET = False
