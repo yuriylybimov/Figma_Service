@@ -11,12 +11,12 @@ import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Union
 
 import typer
 from dotenv import load_dotenv
 from playwright.sync_api import Frame, Page, TimeoutError as PWTimeoutError, sync_playwright
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
@@ -25,25 +25,53 @@ app = typer.Typer(no_args_is_help=True, add_completion=False)
 PROFILE_DIR = Path(os.environ.get("PROFILE_DIR", "./profile")).resolve()
 FIGMA_LOGIN_URL = "https://www.figma.com/login"
 
-PROTOCOL_VERSION = 1
-SENTINEL = "__FS::"
-CLOSING = "::SF__"  # bracket the payload so readback doesn't need a JSON parser
-PAYLOAD_CAP_BYTES = 500
+PROTOCOL_VERSION = 2
+SENTINEL = "__FS::"         # legacy alias; kept so log messages read naturally
+CLOSING = "::SF__"          # legacy alias; same reason
+SENTINEL_PREFIX = SENTINEL  # v2 canonical name
+SENTINEL_CLOSING = CLOSING
+PAYLOAD_CAP_BYTES = 500     # exec-inline hard cap (UTF-8 bytes of the full status doc)
+INLINE_CAP_BYTES = PAYLOAD_CAP_BYTES  # v2 alias used in wrapper substitution
+CHUNK_B64_BYTES = 2048      # 2 KB base64 per C:<i> toast
 
 _QUIET = False
 
 
-class ExecOk(BaseModel):
+class ExecOkInline(BaseModel):
     status: Literal["ok"] = "ok"
+    mode: Literal["inline"] = "inline"
     version: int = PROTOCOL_VERSION
-    result: Any = None
+    request_id: str
+    result: Any
     elapsed_ms: int
+    logs: list[str] = Field(default_factory=list)
+
+
+class ExecOkFile(BaseModel):
+    status: Literal["ok"] = "ok"
+    mode: Literal["file"] = "file"
+    version: int = PROTOCOL_VERSION
+    request_id: str
+    result_path: str
+    bytes: int
+    sha256: str
+    elapsed_ms: int
+    logs: list[str] = Field(default_factory=list)
+
+
+ExecOk = Annotated[Union[ExecOkInline, ExecOkFile], Field(discriminator="mode")]
 
 
 class ExecErr(BaseModel):
     status: Literal["error"] = "error"
     version: int = PROTOCOL_VERSION
-    kind: Literal["user_exception", "payload_too_large", "serialize_failed", "timeout", "injection_failed", "scripter_unreachable"]
+    request_id: str | None = None
+    kind: Literal[
+        "user_exception", "payload_too_large", "serialize_failed",
+        "timeout", "injection_failed", "scripter_unreachable",
+        "chunk_incomplete", "chunk_corrupt",
+        "input_read_failed", "output_write_failed",
+    ]
     message: str
     detail: str | None = None
     elapsed_ms: int | None = None
