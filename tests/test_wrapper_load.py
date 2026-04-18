@@ -1,4 +1,6 @@
 """Verify the wrapper loads from wrapper.js and _wrap_exec substitutes v2 markers."""
+from pathlib import Path
+
 import run
 
 
@@ -32,3 +34,28 @@ def test_wrap_exec_inline_cap_is_substituted():
     # Python's float('inf') stringifies as 'inf'; wrapper accepts Infinity.
     # We substitute the token "Infinity" for any non-finite cap.
     assert "Infinity" in exec_mode
+
+
+def test_wrapper_does_not_use_figma_notify():
+    """Channel regression guard: wrapper must emit via console.log, not toasts."""
+    assert "figma.notify(" not in run._WRAPPER_TEMPLATE
+    assert "console.log(" in run._WRAPPER_TEMPLATE
+
+
+def test_transport_has_no_hardcoded_sentinel_literals():
+    """Sentinel-consistency guard: `__FS::` / `::SF__` must live in protocol.py only."""
+    transport_src = (Path(run.__file__).parent / "transport.py").read_text(encoding="utf-8")
+    # Strip comments and docstrings before scanning — they're allowed to mention
+    # the sentinels for human readers without constituting a duplicated spelling.
+    lines = [
+        line for line in transport_src.splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    # Drop triple-quoted docstrings and double-quoted strings that only contain
+    # the literal as documentation isn't enough: the concern is *runtime* use.
+    # Pragmatic check: no literal `"__FS::"` or `"::SF__"` as Python strings.
+    code_only = "\n".join(lines)
+    assert '"__FS::"' not in code_only
+    assert '"::SF__"' not in code_only
+    assert "'__FS::'" not in code_only
+    assert "'::SF__'" not in code_only
