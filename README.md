@@ -5,7 +5,7 @@ the Scripter community plugin via a headless-ish Firefox, Scripter executes it.
 
 Four commands: `login` (one-time), `hello` (toast smoke test),
 `exec-inline` (run JS, return value inline, ≤500 B status doc), and
-`exec` (run JS, write result to file, no practical size cap).
+`exec` (run JS, write result to file, ≤64 KiB serialized).
 
 ## Quickstart
 
@@ -85,6 +85,7 @@ written atomically with mode `0o600`.
 | `timeout` | `stage=<begin\|chunk_stream> elapsed_ms=<m> timeout_s=<t>` |
 | `chunk_incomplete` | `got=<n> expected=<N> missing=<i,j,k,…>` |
 | `chunk_corrupt` | `stage=<b64_decode\|length_mismatch\|sha256_mismatch\|json_parse> …` |
+| `payload_too_large` | `bytes=<n> cap=<c>` (UTF-8 bytes of the serialized status doc) |
 | `input_read_failed` | `path=<p> error=<class>: <msg>` |
 | `output_write_failed` | `path=<p> stage=<open\|write\|fsync\|chmod\|rename> error=<class>: <msg>` |
 
@@ -110,8 +111,11 @@ python run.py exec --code 'return bigThing();' --out ./result.json
 
 - `--out` is **required**. Parent directory must exist. Writes are atomic
   (tmp file + `os.replace`); partial files never appear under the target name.
-- Target payload ceiling: ~5 MB (document-level; not enforced host-side).
-  Transport scales linearly; a 5 MB dump takes ~25 s of wire time plus mount.
+- **Hard cap: 64 KiB (65 536 B) per serialized result.** Measured in UTF-8
+  bytes of the wrapper's ok status doc. Oversize results fail fast with
+  `kind:"payload_too_large"` *before* chunked transport begins — no file is
+  written. This is the chunked-toast reliability ceiling in Phase 1.5;
+  MB-scale results need the deferred hidden-iframe transport (see *Deferred*).
 - On wrapper error (user exception, serialize failure, etc.), **no file is
   written** — the status doc on stdout describes what happened.
 
@@ -180,7 +184,11 @@ plan's verification section.
 
 ## Deferred
 
-Module split into `src/figma_service/{bridge,scripter,protocol,session,host_io,wrapper}.py`,
-high-throughput transport via `figma.showUI` hidden iframe, retry policy
-keyed off the kind enum, console.log capture in the wrapper, `--code-file`
-glob for batch execution.
+- **Hidden-iframe transport via `figma.showUI`** — the realistic MB-scale
+  path past the Phase 1.5 64 KiB chunked-toast cap. Carries its own protocol
+  bump; the sentinel grammar already leaves room for a second `transport`
+  value in the BEGIN header.
+- Module split into `src/figma_service/{bridge,scripter,protocol,session,host_io,wrapper}.py`.
+- Retry policy keyed off the `kind` enum.
+- `console.log` capture in the wrapper.
+- `--code-file` glob for batch execution.
