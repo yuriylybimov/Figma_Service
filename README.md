@@ -3,9 +3,12 @@
 Bridge: Claude writes a Figma Plugin API script, `run.py` pastes it into
 the Scripter community plugin via a headless-ish Firefox, Scripter executes it.
 
-Four commands: `login` (one-time), `hello` (toast smoke test),
-`exec-inline` (run JS, return value inline, ≤500 B status doc), and
-`exec` (run JS, write result to file, ≤64 KiB serialized).
+Top-level commands: `login` (one-time), `hello` (toast smoke test),
+`exec-inline` (run JS, return value inline, ≤500 B), and
+`exec` (run JS, write result to file, ≤64 KiB).
+
+`read` sub-app: eight read-only Figma queries — document, selection, pages,
+variable collections, local styles, and components — each emitting a v2 status doc.
 
 ## Quickstart
 
@@ -114,10 +117,25 @@ python run.py exec --code 'return bigThing();' --out ./result.json
 - **Hard cap: 64 KiB (65 536 B) per serialized result.** Measured in UTF-8
   bytes of the wrapper's ok status doc. Oversize results fail fast with
   `kind:"payload_too_large"` *before* chunked transport begins — no file is
-  written. This is the chunked-toast reliability ceiling in Phase 1.5;
+  written. This is the console.log transport ceiling in Phase 1.5;
   MB-scale results need the deferred hidden-iframe transport (see *Deferred*).
 - On wrapper error (user exception, serialize failure, etc.), **no file is
   written** — the status doc on stdout describes what happened.
+
+## `read <tool>`
+
+```bash
+python run.py read ping
+python run.py read document-summary --out /tmp/doc.json
+python run.py read page-nodes-summary --page-id 12:4455 --out /tmp/nodes.json
+python run.py read variable-collection-detail --collection-id VariableCollectionId:67:1933 --out /tmp/vars.json
+python run.py read local-styles-summary --kind paint --out /tmp/styles.json
+python run.py read components-summary --page-id 12:4455 --offset 0 --limit 50 --out /tmp/comps.json
+```
+
+All `read` commands share: `-f / --file`, `--timeout` (default 10 s),
+`--mount-timeout` (default 30 s), `--quiet`, and optional `--out` for file mode.
+Omit `--out` to get inline mode (capped at 500 B; useful only for small results like `ping`).
 
 ## Integrity
 
@@ -146,27 +164,36 @@ TTY, the command refuses (no prompt) with `input_read_failed`.
 
 ## Reserved sentinel
 
-`__FS::` is reserved. Do not emit `figma.notify("__FS::…")` from your own
-code — it will confuse the bridge's MutationObserver collector.
+`__FS::` is reserved. Do not emit `console.log("__FS::…")` from your own
+code — it will confuse the bridge's sentinel collector.
 
 ## How it works
 
 `run.py` drives a persistent Firefox profile under `./profile/`. Each command
 opens the configured Figma file, finds the Scripter iframe, writes the script
 atomically via Monaco's `model.setValue()`, and clicks the `.button.run` control.
-Before clicking Run, a `MutationObserver` is installed on the Figma page that
-captures every `__FS::<rid>:…::SF__` toast at DOM-insert time (so Figma's ~6 s
-auto-dismiss doesn't race us). The wrapper emits a BEGIN header + N base64
-chunks of the JSON status doc; the bridge reassembles, verifies sha256, and for
+Before clicking Run, a `page.on("console")` handler is registered on the
+Playwright page; Playwright routes `console.log` calls from the Scripter iframe
+to this handler. The wrapper emits a BEGIN header + N base64 chunks of the JSON
+status doc via `console.log`; the bridge reassembles, verifies sha256, and for
 `exec` writes just the `result` value atomically to `--out`.
 
 ## Layout
 
-- `run.py` — CLI entry, v2 protocol models, bridge, commands.
-- `wrapper.js` — mode-agnostic JS wrapper template (markers: `__RID__`,
-  `__INLINE_CAP__`, `__SENTINEL_PREFIX__`, `__SENTINEL_CLOSING__`,
-  `__CHUNK_B64_BYTES__`, `/*__USER_JS__*/`).
-- `tests/` — host-side unit tests (pytest). E2E is manual against a real Figma file.
+- `run.py` — CLI entry; top-level commands (`exec-inline`, `exec`, `login`, `hello`);
+  re-exports sibling module symbols for backward compatibility.
+- `read_handlers.py` — `read` sub-app: eight read-only Figma queries, `_dispatch_read`
+  helper, all JS templates, shared pagination-slice constant.
+- `transport.py` — Playwright driver: launch Firefox, mount Scripter, inject wrapper,
+  collect `console.log` sentinels, reassemble chunks.
+- `protocol.py` — v2 wire format: sentinel constants, cap values, Pydantic status doc
+  models, chunk reassembly logic.
+- `host_io.py` — host-side I/O: logging, code-source resolution (`--code` / `--code-file`
+  / stdin), atomic file writes.
+- `wrapper.js` — mode-agnostic JS wrapper template injected into Scripter (markers:
+  `__RID__`, `__INLINE_CAP__`, `__CHUNK_B64_BYTES__`, `/*__USER_JS__*/`).
+- `tests/` — unit tests (pytest): protocol models, chunk reassembly, host I/O, wrapper
+  template. E2E is manual against a real Figma file.
 - `pyproject.toml` — Python ≥3.10. Runtime deps: playwright, typer,
   python-dotenv, pydantic. Dev deps: pytest.
 - `profile/` — Firefox user-data-dir (gitignored; holds session + Scripter).
@@ -182,13 +209,75 @@ Unit tests cover protocol models, host I/O, and chunk reassembly. The full
 E2E matrix (against a real Figma file) lives in the phase 1.5 implementation
 plan's verification section.
 
+## CLI Reference
+
+### Top-level
+
+**`login`**
+One-time setup: opens headed Firefox so you can sign in, install Scripter, and copy the file URL.
+No flags.
+
+**`hello`**
+Toast smoke test — pastes `figma.notify(<message>)` and runs it.
+Flags: `-m / --message` (default `"bridge alive"`), `-f / --file`, `--timeout`, `--mount-timeout`, `--quiet`.
+
+**`exec-inline`**
+Run a JS snippet; emit the result inline in the status doc (≤500 B).
+Flags: `--code / -c` or `--code-file` (one required), `-f`, `--timeout`, `--mount-timeout`, `--quiet`.
+Output: inline `{"status":"ok","mode":"inline","result":<any>,…}`.
+
+**`exec`**
+Run a JS snippet; write the result to a file (≤64 KiB).
+Flags: `--code / -c` or `--code-file` (one required), `--out` (required), `-f`, `--timeout`, `--mount-timeout`, `--quiet`.
+Output: `{"status":"ok","mode":"file","result_path":"…","bytes":<n>,"sha256":"…",…}`.
+
+### `read` sub-app (`python run.py read …`)
+
+All `read` commands accept `-f / --file`, `--timeout`, `--mount-timeout`, `--quiet`.
+`--out` is optional unless noted; omit for inline mode (500 B cap).
+
+**`read ping`**
+Confirms the bridge is alive; returns current page name.
+Flags: `--out?`. Output: `{"ping":true,"pageName":"…"}`.
+
+**`read document-summary`**
+Document name, type, page list, and current page id.
+Flags: `--out?`. Output: `{"name":"…","pages":[…],"currentPageId":"…"}`.
+
+**`read selection-info`**
+Id, type, geometry, and parent of every selected node on the current page.
+Flags: `--out?`. Output: array of node objects (empty array if nothing selected).
+
+**`read page-nodes-summary`**
+Top-level children of a page with id, name, type, child count, and geometry.
+Flags: `--page-id?` (defaults to current page), `--out?`.
+Output: `{"pageId":"…","pageName":"…","nodes":[…]}`.
+
+**`read variable-collections-summary`**
+All local variable collections: id, name, modes, variable count.
+Flags: `--out?`. Output: array of collection summary objects.
+
+**`read variable-collection-detail`**
+Full expansion of one collection: all variables with values-by-mode, scopes, type.
+Flags: `--collection-id` (required), `--out` (required — payload reliably exceeds 500 B).
+Output: `{"id":"…","modes":[…],"variables":[…]}`.
+
+**`read local-styles-summary`**
+Local styles of one kind, paginated.
+Flags: `--kind paint|text|effect|grid` (required), `--offset` (default 0), `--limit?`, `--out?`.
+Output: `{"kind":"…","total":<n>,"offset":<n>,"limit":<n>,"items":[…]}`.
+
+**`read components-summary`**
+Components and component sets on a page, paginated.
+Flags: `--page-id?`, `--offset` (default 0), `--limit?`, `--out?`.
+Output: `{"pageId":"…","total":<n>,"offset":<n>,"limit":<n>,"items":[…]}`.
+
 ## Deferred
 
 - **Hidden-iframe transport via `figma.showUI`** — the realistic MB-scale
-  path past the Phase 1.5 64 KiB chunked-toast cap. Carries its own protocol
-  bump; the sentinel grammar already leaves room for a second `transport`
-  value in the BEGIN header.
-- Module split into `src/figma_service/{bridge,scripter,protocol,session,host_io,wrapper}.py`.
+  path past the 64 KiB console.log cap. Carries its own protocol bump; the
+  sentinel grammar already leaves room for a second `transport` value in the
+  BEGIN header.
 - Retry policy keyed off the `kind` enum.
-- `console.log` capture in the wrapper.
 - `--code-file` glob for batch execution.
+- Pagination for `page-nodes-summary` (needed only for pages with >~340 direct children).
