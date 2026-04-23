@@ -337,6 +337,25 @@ def read_variable_collection_detail(
 
 _LOCAL_STYLES_KINDS = ("paint", "text", "effect", "grid")
 
+_SCRIPT_DIR = Path(__file__).parent / "scripts" / "variables"
+
+
+@read_app.command("color-usage-summary")
+def read_color_usage_summary(
+    out: str = typer.Option(..., "--out", help="Write usage JSON to this path (required — payload may be large)."),
+    timeout: float = typer.Option(30.0, "--timeout"),
+    mount_timeout: float = typer.Option(30.0, "--mount-timeout"),
+    file_url: str | None = typer.Option(None, "-f", "--file"),
+    quiet: bool = typer.Option(False, "--quiet"),
+) -> None:
+    """Scan Figma file for solid-fill colors; write raw usage JSON to --out."""
+    script_path = _SCRIPT_DIR / "read_color_usage_summary.js"
+    if not script_path.exists():
+        raise typer.BadParameter(f"Script not found: {script_path}")
+    user_js = script_path.read_text(encoding="utf-8")
+    _dispatch_read(user_js, out=out, timeout=timeout,
+                   mount_timeout=mount_timeout, file_url=file_url, quiet=quiet)
+
 # Shared pagination slice injected into both local-styles-summary and
 # components-summary. Source array must be bound to `_all` before this runs.
 _JS_PAGINATE_SLICE = """

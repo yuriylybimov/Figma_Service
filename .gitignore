@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
+# docs/
+tokens/primitives.proposed.json
+/tmp/
