@@ -198,6 +198,21 @@ def _fmt_group_block(normalized: list[dict]) -> list[str]:
     return lines
 
 
+def _fmt_top_color_lines(sorted_colors: list[dict], *, limit: int = 10) -> list[str]:
+    """Return formatted lines for the top-N colors by usage."""
+    lines: list[str] = []
+    for c in sorted_colors[:limit]:
+        total = c["fill_count"] + c["stroke_count"]
+        if c["status"] == "matched":
+            label = f"→ {c['primitive_name']} (matched)"
+        elif c["status"] == "paint_style":
+            label = f"→ {c['paint_style_name']} (paint_style)"
+        else:
+            label = "→ NEW CANDIDATE"
+        lines.append(f"  {c['hex']}  ×{total:<5} {label}")
+    return lines
+
+
 def _fmt_merge_summary_line(before: int, merged: int, after: int) -> str:
     return f"  Merge  before={before}  merged={merged}  after={after}"
 
@@ -619,15 +634,8 @@ def plan_primitive_colors_from_project(
     typer.echo(f"  From paint styles: {paint_style_count}")
     typer.echo(f"  New candidates: {new_candidates}")
     typer.echo(f"\nTop colors by usage:")
-    for c in sorted_colors[:10]:
-        total = c["fill_count"] + c["stroke_count"]
-        if c["status"] == "matched":
-            label = f"→ {c['primitive_name']} (matched)"
-        elif c["status"] == "paint_style":
-            label = f"→ {c['paint_style_name']} (paint_style)"
-        else:
-            label = "→ NEW CANDIDATE"
-        typer.echo(f"  {c['hex']}  ×{total:<5} {label}")
+    for line in _fmt_top_color_lines(sorted_colors):
+        typer.echo(line)
 
     # Write proposal
     out_path = Path(out).resolve()
