@@ -3,6 +3,7 @@
 All commands run entirely on the host. No Figma round-trips.
 """
 
+import colorsys
 import json
 import sys
 from datetime import datetime, timezone
@@ -36,6 +37,89 @@ def _build_lookup(
 
 
 _STATUS_ORDER = {"matched": 0, "paint_style": 1, "new_candidate": 2}
+
+_HUE_GROUPS = [
+    (0.0,  0.05, "red"),
+    (0.05, 0.11, "orange"),
+    (0.11, 0.20, "yellow"),
+    (0.20, 0.46, "green"),
+    (0.46, 0.52, "cyan"),
+    (0.52, 0.69, "blue"),
+    (0.69, 0.79, "violet"),
+    (0.79, 0.86, "purple"),
+    (0.86, 0.95, "pink"),
+    (0.95, 1.01, "red"),   # wrap-around
+]
+_GRAY_SATURATION_THRESHOLD = 0.12
+_SCALES = [100, 200, 300, 400, 500, 600, 700, 800, 900]
+
+
+def _hex_to_hls(hex_: str) -> tuple[float, float, float]:
+    h = hex_.lstrip("#")
+    r, g, b = int(h[0:2], 16) / 255, int(h[2:4], 16) / 255, int(h[4:6], 16) / 255
+    return colorsys.rgb_to_hls(r, g, b)  # (hue, lightness, saturation)
+
+
+def _color_group(hue: float, saturation: float) -> str:
+    if saturation < _GRAY_SATURATION_THRESHOLD:
+        return "gray"
+    for lo, hi, name in _HUE_GROUPS:
+        if lo <= hue < hi:
+            return name
+    return "gray"
+
+
+def _assign_scales(lightness_values: list[float]) -> list[int]:
+    """Map N lightness values (same-group, in input order) → 100-900 scale integers.
+    Lighter = lower scale number. With fewer than 9 values, picks evenly spaced slots."""
+    n = len(lightness_values)
+    if n == 0:
+        return []
+    if n == 1:
+        return [500]
+    order = sorted(range(n), key=lambda i: lightness_values[i], reverse=True)
+    slot_indices = [round(i * 8 / (n - 1)) for i in range(n)]
+    result = [0] * n
+    for rank, orig_idx in enumerate(order):
+        result[orig_idx] = _SCALES[slot_indices[rank]]
+    return result
+
+
+def _build_normalized_entries(
+    candidates: list[dict],
+    *,
+    overrides: dict[str, str],
+) -> list[dict]:
+    """Classify candidates into groups, assign scales, apply overrides."""
+    groups: dict[str, list] = {}
+    for idx, c in enumerate(candidates):
+        hue, lightness, sat = _hex_to_hls(c["hex"])
+        group = _color_group(hue, sat)
+        groups.setdefault(group, []).append((idx, c, lightness))
+
+    auto_names: dict[str, str] = {}
+    for group_name, members in groups.items():
+        lightness_values = [m[2] for m in members]
+        scales = _assign_scales(lightness_values)
+        for (idx, c, _), scale in zip(members, scales):
+            auto_names[c["hex"]] = f"color/{group_name}/{scale}"
+
+    result = []
+    for c in candidates:
+        hex_ = c["hex"]
+        auto = auto_names[hex_]
+        final = overrides.get(hex_, auto)
+        candidate_name = f"color/candidate/{hex_.lstrip('#')}"
+        result.append({
+            "hex": hex_,
+            "candidate_name": candidate_name,
+            "auto_name": auto,
+            "final_name": final,
+            "fill_count": c["fill_count"],
+            "stroke_count": c["stroke_count"],
+            "examples": c.get("examples", []),
+        })
+    return result
 
 
 def _classify_colors(

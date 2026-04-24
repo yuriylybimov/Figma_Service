@@ -233,3 +233,78 @@ def test_command_warns_on_overwrite(tmp_path):
     assert "WARNING: overwriting" in result.output
     proposal = json.loads(out_file.read_text())
     assert "summary" in proposal
+
+
+# --- normalize helpers ---
+
+import colorsys
+
+def test_hex_to_hls_white():
+    from plan_handlers import _hex_to_hls
+    h, l, s = _hex_to_hls("#ffffff")
+    assert l == pytest.approx(1.0)
+
+def test_hex_to_hls_black():
+    from plan_handlers import _hex_to_hls
+    h, l, s = _hex_to_hls("#000000")
+    assert l == pytest.approx(0.0)
+
+def test_color_group_gray():
+    from plan_handlers import _color_group
+    # Low saturation → gray
+    assert _color_group(0.5, 0.05) == "gray"
+
+def test_color_group_red():
+    from plan_handlers import _color_group
+    # hue ~0.0, high saturation → red
+    assert _color_group(0.02, 0.8) == "red"
+
+def test_color_group_blue():
+    from plan_handlers import _color_group
+    # hue ~0.65, high saturation → blue
+    assert _color_group(0.65, 0.8) == "blue"
+
+def test_assign_scale_single():
+    from plan_handlers import _assign_scales
+    # Single color → scale 500
+    result = _assign_scales([0.5])
+    assert result == [500]
+
+def test_assign_scale_two_lightest_first():
+    from plan_handlers import _assign_scales
+    # Two lightness values: lighter gets lower number
+    result = _assign_scales([0.9, 0.1])
+    assert result[0] < result[1]
+
+def test_assign_scale_nine_even():
+    from plan_handlers import _assign_scales
+    # lightness[0]=0.0 (darkest) → scale 900; lightness[8]=1.0 (lightest) → scale 100
+    lightness = [i / 8 for i in range(9)]
+    result = _assign_scales(lightness)
+    assert result == [900, 800, 700, 600, 500, 400, 300, 200, 100]
+
+def test_build_normalized_entries_basic():
+    from plan_handlers import _build_normalized_entries
+    candidates = [
+        {"hex": "#2f2f2f", "fill_count": 10, "stroke_count": 0,
+         "status": "new_candidate", "primitive_name": None,
+         "paint_style_name": None, "duplicate_warning": False, "examples": []},
+    ]
+    result = _build_normalized_entries(candidates, overrides={})
+    assert len(result) == 1
+    e = result[0]
+    assert e["hex"] == "#2f2f2f"
+    assert e["auto_name"].startswith("color/")
+    assert e["final_name"] == e["auto_name"]
+    assert e["candidate_name"] == "color/candidate/2f2f2f"
+
+def test_build_normalized_entries_override_applied():
+    from plan_handlers import _build_normalized_entries
+    candidates = [
+        {"hex": "#2f2f2f", "fill_count": 10, "stroke_count": 0,
+         "status": "new_candidate", "primitive_name": None,
+         "paint_style_name": None, "duplicate_warning": False, "examples": []},
+    ]
+    result = _build_normalized_entries(candidates, overrides={"#2f2f2f": "color/neutral/900"})
+    assert result[0]["final_name"] == "color/neutral/900"
+    assert result[0]["auto_name"] != "color/neutral/900"
