@@ -67,6 +67,7 @@ from transport import (
 from read_handlers import read_app
 from sync_handlers import sync_app
 from plan_handlers import plan_app
+from override_handlers import override_app
 
 load_dotenv()
 
@@ -74,6 +75,7 @@ app = typer.Typer(no_args_is_help=True, add_completion=False)
 app.add_typer(read_app, name="read")
 app.add_typer(sync_app, name="sync")
 app.add_typer(plan_app, name="plan")
+app.add_typer(override_app, name="override")
 
 
 def _emit_exit(model, code: int) -> None:

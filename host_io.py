@@ -13,6 +13,7 @@ from protocol import _BridgeError
 
 
 _QUIET = False
+_DEBUG = False
 
 
 def set_quiet(value: bool) -> None:
@@ -21,8 +22,17 @@ def set_quiet(value: bool) -> None:
     _QUIET = value
 
 
+def set_debug(value: bool) -> None:
+    """Enable debug mode: show all [info] infrastructure logs on stderr."""
+    global _DEBUG
+    _DEBUG = value
+
+
 def _log(level: str, msg: str) -> None:
     if _QUIET and level != "error":
+        return
+    # Suppress info-level infra logs unless debug mode is on.
+    if level == "info" and not _DEBUG:
         return
     ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     print(f"{ts} [{level}] {msg}", file=sys.stderr)

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import typer
 
-from host_io import _log, _trim, set_quiet
+from host_io import _log, _trim, set_quiet, set_debug
 from protocol import EXEC_CAP_BYTES, ExecErr, ExecOkInline, _BridgeError
 from transport import _bridge_exec
 
@@ -40,7 +40,12 @@ def _dispatch_sync(
     mount_timeout: float,
     file_url: str | None,
     quiet: bool,
-) -> None:
+) -> tuple[dict, ExecOkInline]:
+    """Run JS via the bridge and return (js_result_dict, ok_model) on success.
+
+    On error calls _emit_exit (which raises typer.Exit) so callers never see a
+    partial return. On success the caller is responsible for calling _emit_exit.
+    """
     set_quiet(quiet)
     rid = secrets.token_hex(8)
     t0 = time.monotonic()
@@ -69,17 +74,16 @@ def _dispatch_sync(
                                elapsed_ms=ms(), request_id=rid), 1)
 
     result = raw.get("result", {})
-    _log("info", f"sync result: {json.dumps(result)}")
 
     try:
-        _emit_exit(ExecOkInline.model_validate({**raw, "mode": "inline"}), 0)
-    except typer.Exit:
-        raise
+        ok_model = ExecOkInline.model_validate({**raw, "mode": "inline"})
     except Exception as e:
         _emit_exit(ExecErr(kind="injection_failed",
                            message=f"wrapper payload validation: {e}",
                            detail=_trim("".join(traceback.format_exception_only(e)).strip()),
                            elapsed_ms=ms(), request_id=rid), 1)
+
+    return result, ok_model
 
 
 def _run_validation(
@@ -160,28 +164,16 @@ def sync_primitive_colors(
     file_url: str | None = typer.Option(None, "-f", "--file"),
     quiet: bool = typer.Option(False, "--quiet"),
 ) -> None:
-    """Create or update primitive color variables in Figma from tokens/primitives.json."""
-    set_quiet(quiet)
-
-    _run_validation(timeout=timeout, mount_timeout=mount_timeout,
-                    file_url=file_url, quiet=quiet)
-
-    tokens_path = Path(tokens_file)
-    if not tokens_path.exists():
-        raise typer.BadParameter(f"Token file not found: {tokens_path}")
-
-    tokens = json.loads(tokens_path.read_text())
-
-    script_path = _SCRIPT_DIR / "sync_primitive_colors.js"
-    if not script_path.exists():
-        raise typer.BadParameter(f"Script not found: {script_path}")
-
-    user_js = (script_path.read_text()
-               .replace("__TOKENS__", json.dumps(tokens))
-               .replace("__DRY_RUN__", "true" if dry_run else "false"))
-
-    _dispatch_sync(user_js, timeout=timeout, mount_timeout=mount_timeout,
-                   file_url=file_url, quiet=quiet)
+    """[LEGACY] Not part of the normalized token pipeline. Use sync primitive-colors-normalized instead."""
+    typer.echo(
+        "ERROR: sync primitive-colors is a legacy command and is not part of the "
+        "normalized token pipeline.\n"
+        "Use the architecture-defined sync path instead:\n"
+        "  plan primitive-colors-normalized  →  plan validate-normalized  →  "
+        "sync primitive-colors-normalized",
+        err=True,
+    )
+    raise typer.Exit(1)
 
 
 @sync_app.command("primitive-colors-normalized")
@@ -192,6 +184,9 @@ def sync_primitive_colors_normalized(
         help="Path to primitives.normalized.json from `plan primitive-colors-normalized`.",
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview changes without writing to Figma."),
+    verbose: bool = typer.Option(False, "--verbose", help="Print per-entry log (human mode only)."),
+    json_output: bool = typer.Option(False, "--json", help="Emit only machine-readable JSON; suppresses all human output."),
+    debug: bool = typer.Option(False, "--debug", help="Show infrastructure logs (Playwright, bridge) on stderr."),
     timeout: float = typer.Option(10.0, "--timeout"),
     mount_timeout: float = typer.Option(30.0, "--mount-timeout"),
     file_url: str | None = typer.Option(None, "-f", "--file"),
@@ -199,6 +194,7 @@ def sync_primitive_colors_normalized(
 ) -> None:
     """Rename color/candidate/<hex> variables to their final names, or create them from normalized JSON."""
     set_quiet(quiet)
+    set_debug(debug)
 
     _run_validation(timeout=timeout, mount_timeout=mount_timeout,
                     file_url=file_url, quiet=quiet)
@@ -211,8 +207,14 @@ def sync_primitive_colors_normalized(
     if "colors" not in data:
         raise typer.BadParameter("Normalized file missing required key: 'colors'")
 
-    entries = data["colors"]
-    typer.echo(f"Entries: {len(entries)} normalized colors")
+    def _entry_sort_key(e: dict) -> tuple:
+        parts = e.get("final_name", "").split("/")
+        group = parts[1] if len(parts) >= 2 else ""
+        scale_str = parts[2] if len(parts) >= 3 else ""
+        scale = int(scale_str) if scale_str.isdigit() else float("inf")
+        return (group, scale)
+
+    entries = sorted(data["colors"], key=_entry_sort_key)
 
     script_path = _SCRIPT_DIR / "sync_primitive_colors_normalized.js"
     if not script_path.exists():
@@ -222,51 +224,64 @@ def sync_primitive_colors_normalized(
                .replace("__NORMALIZED__", json.dumps(entries))
                .replace("__DRY_RUN__", "true" if dry_run else "false"))
 
-    _dispatch_sync(user_js, timeout=timeout, mount_timeout=mount_timeout,
-                   file_url=file_url, quiet=quiet)
+    result, ok_model = _dispatch_sync(user_js, timeout=timeout, mount_timeout=mount_timeout,
+                                       file_url=file_url, quiet=quiet)
 
+    if json_output:
+        # Machine mode: JSON only, no human text.
+        _emit_exit(ok_model, 0)
 
-@sync_app.command("primitive-colors-from-proposal")
-def sync_primitive_colors_from_proposal(
-    proposal_file: str = typer.Option(
-        str(_TOKENS_DIR / "primitives.proposed.json"),
-        "--proposal",
-        help="Path to primitives.proposed.json from `plan primitive-colors-from-project`.",
-    ),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Preview changes without writing to Figma."),
-    limit: int | None = typer.Option(None, "--limit", min=1, help="Max candidates to sync."),
-    timeout: float = typer.Option(10.0, "--timeout"),
-    mount_timeout: float = typer.Option(30.0, "--mount-timeout"),
-    file_url: str | None = typer.Option(None, "-f", "--file"),
-    quiet: bool = typer.Option(False, "--quiet"),
-) -> None:
-    """Create or update primitive color variables from new_candidate entries in a proposal file."""
-    set_quiet(quiet)
+    # Human mode: summary (+ optional verbose log), no JSON.
+    label = "Dry-run summary" if dry_run else "Sync summary"
+    typer.echo(f"\n{label}")
+    typer.echo(f"  +{result.get('created', '?')} created"
+               f"  ~{result.get('renamed', '?')} renamed"
+               f"  {result.get('skipped', '?')} skipped"
+               f"  ({result.get('total', len(entries))} total)")
 
-    _run_validation(timeout=timeout, mount_timeout=mount_timeout,
-                    file_url=file_url, quiet=quiet)
+    log_entries = result.get("log", [])
 
-    proposal_path = Path(proposal_file)
-    if not proposal_path.exists():
-        raise typer.BadParameter(f"Proposal file not found: {proposal_path}")
+    if not verbose:
+        # Default: grouped preview of created tokens.
+        created = [e for e in log_entries if e.get("action") in ("would-rename-or-create", "created")]
+        if created:
+            groups: dict[str, list[tuple[str, str]]] = {}
+            for e in created:
+                fname = e.get("final_name") or e.get("name", "")
+                hex_ = e.get("hex") or e.get("value", "")
+                parts = fname.split("/")
+                group = parts[-2] if len(parts) >= 2 else "other"
+                scale = parts[-1] if len(parts) >= 1 else "?"
+                groups.setdefault(group, []).append((scale, hex_))
+            typer.echo("\nCreated tokens (by group)\n")
+            fixed_items: list[tuple[str, str]] = []
+            for group, items in sorted(groups.items()):
+                items_sorted = sorted(items, key=lambda x: int(x[0]) if x[0].isdigit() else x[0])
+                if group == "color" and all(not s.isdigit() for s, _ in items_sorted):
+                    fixed_items = items_sorted
+                    continue
+                typer.echo(f"  {group} ({len(items_sorted)})")
+                for scale, hex_ in items_sorted:
+                    typer.echo(f"    {scale:<5}  {hex_}")
+            if fixed_items:
+                for label, hex_ in fixed_items:
+                    typer.echo(f"  {label:<7}  {hex_}")
+    else:
+        # Verbose: diff-style lines for all log entries.
+        if log_entries:
+            typer.echo("\nDetailed changes\n")
+            for e in sorted(log_entries, key=lambda e: e.get("final_name", e.get("name", ""))):
+                action = e.get("action", "")
+                final = e.get("final_name", e.get("name", "?"))
+                hex_ = e.get("hex", e.get("value", ""))
+                parts = final.split("/")
+                short = "/".join(parts[-2:]) if len(parts) >= 2 else final
+                if action in ("would-rename-or-create", "created"):
+                    typer.echo(f"  + {short:<30}  {hex_}")
+                elif action == "renamed":
+                    from_ = e.get("from", "?")
+                    typer.echo(f"  ~ {from_:<30}  → {final}")
+                elif action == "skipped":
+                    typer.echo(f"  = {short:<30}  (skipped)")
 
-    data = json.loads(proposal_path.read_text(encoding="utf-8"))
-    if "colors" not in data:
-        raise typer.BadParameter("Proposal file missing required key: 'colors'")
-
-    candidates = [c for c in data["colors"] if c["status"] == "new_candidate"]
-    if limit is not None:
-        candidates = candidates[:limit]
-
-    typer.echo(f"Candidates: {len(candidates)} new_candidate colors")
-
-    script_path = _SCRIPT_DIR / "sync_primitive_colors_from_proposal.js"
-    if not script_path.exists():
-        raise typer.BadParameter(f"Script not found: {script_path}")
-
-    user_js = (script_path.read_text(encoding="utf-8")
-               .replace("__CANDIDATES__", json.dumps(candidates))
-               .replace("__DRY_RUN__", "true" if dry_run else "false"))
-
-    _dispatch_sync(user_js, timeout=timeout, mount_timeout=mount_timeout,
-                   file_url=file_url, quiet=quiet)
+    raise typer.Exit(0)

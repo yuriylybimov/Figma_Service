@@ -340,6 +340,23 @@ _LOCAL_STYLES_KINDS = ("paint", "text", "effect", "grid")
 _SCRIPT_DIR = Path(__file__).parent / "scripts" / "variables"
 
 
+@read_app.command("color-usage-detail")
+def read_color_usage_detail(
+    out: str = typer.Option(..., "--out", help="Write usage JSON to this path (required — payload may be large)."),
+    timeout: float = typer.Option(30.0, "--timeout"),
+    mount_timeout: float = typer.Option(30.0, "--mount-timeout"),
+    file_url: str | None = typer.Option(None, "-f", "--file"),
+    quiet: bool = typer.Option(False, "--quiet"),
+) -> None:
+    """Per-hex usage detail: use_count, sample_nodes (max 5), sample_pages."""
+    script_path = _SCRIPT_DIR / "read_color_usage_detail.js"
+    if not script_path.exists():
+        raise typer.BadParameter(f"Script not found: {script_path}")
+    user_js = script_path.read_text(encoding="utf-8")
+    _dispatch_read(user_js, out=out, timeout=timeout,
+                   mount_timeout=mount_timeout, file_url=file_url, quiet=quiet)
+
+
 @read_app.command("color-usage-summary")
 def read_color_usage_summary(
     out: str = typer.Option(..., "--out", help="Write usage JSON to this path (required — payload may be large)."),
