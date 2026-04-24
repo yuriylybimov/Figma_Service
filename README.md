@@ -272,6 +272,88 @@ Components and component sets on a page, paginated.
 Flags: `--page-id?`, `--offset` (default 0), `--limit?`, `--out?`.
 Output: `{"pageId":"…","total":<n>,"offset":<n>,"limit":<n>,"items":[…]}`.
 
+## Color Token Pipeline
+
+A multi-step command sequence that reads color usage from Figma, proposes and deduplicated primitives, merges overrides, normalizes, audits, validates, and finally syncs — with a mandatory human review and dry-run gate before any write.
+
+### Full sequence
+
+```bash
+# 1. Snapshot current color usage
+python run.py read color-usage-summary
+python run.py read color-usage-detail
+
+# 2. Propose primitive palette from project colors
+python run.py plan primitive-colors-from-project
+
+# 3. Identify and remove stale / redundant tokens
+python run.py plan cleanup-candidates
+python run.py plan deduplicate-primitives
+
+# 4. Human review step — inspect generated files before continuing
+#    Review tokens/primitives.proposed.json, tokens/primitives.cleanup.json,
+#    tokens/primitives.dedup.json; edit if needed.
+
+# 5. Suggest override merges and explicitly apply them
+python run.py plan suggest-merge-overrides   # writes overrides.merge.proposed.json
+#    Review tokens/overrides.merge.proposed.json; edit if needed.
+python run.py override apply-merge-proposal  # promotes to overrides.merge.json
+
+# 6. Normalize, audit, and validate
+python run.py plan primitive-colors-normalized
+python run.py plan audit-palette
+python run.py plan validate-normalized
+
+# 7. Sync — always dry-run first
+python run.py sync primitive-colors-normalized --dry-run
+python run.py sync primitive-colors-normalized
+```
+
+### Human review step
+
+`plan suggest-merge-overrides` only *proposes* merges — it writes
+`tokens/overrides.merge.proposed.json` and stops. Review (and edit) that file,
+then run `override apply-merge-proposal` to promote it to `tokens/overrides.merge.json`.
+Nothing is applied without the explicit second command.
+
+## CLI Output Modes
+
+All `plan`, `read`, `sync`, and `override` commands respect these output flags:
+
+| Flag | Behavior |
+|---|---|
+| *(default)* | Human-readable grouped output to stdout |
+| `--verbose` | Readable diff-style details showing what changed |
+| `--json` | Machine-readable JSON to stdout only; no decoration |
+| `--debug` | Infrastructure/transport logs emitted to stderr |
+
+## Generated Files
+
+The following files are produced by the pipeline and **must not be committed**:
+
+```
+tokens/primitives.proposed.json
+tokens/primitives.cleanup.json
+tokens/primitives.dedup.json
+tokens/primitives.normalized.json
+tokens/overrides.merge.proposed.json
+tokens/overrides.merge.json
+tokens/overrides.normalized.json
+```
+
+They are local working artifacts — intermediate state between pipeline steps.
+Add them to `.gitignore` if not already present.
+
+## Safety Rules
+
+- **Never run `sync` before `validate-normalized` passes.** The validate step
+  is the gate; skip it and you risk pushing malformed tokens to Figma.
+- **Always dry-run first.** `sync primitive-colors-normalized --dry-run` prints
+  what *would* change without touching Figma. Confirm the diff before the real sync.
+- **`sync primitive-colors-normalized` is the only valid color sync path.**
+  Legacy or ad-hoc sync commands that bypass the normalize → audit → validate
+  sequence must not be used.
+
 ## Deferred
 
 - **Hidden-iframe transport via `figma.showUI`** — the realistic MB-scale
