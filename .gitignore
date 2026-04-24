@@ -5,6 +5,10 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
-# docs/
+#docs/
+# generated tokens (do not commit)
+tokens/primitives.json
+tokens/primitives.normalized.json
 tokens/primitives.proposed.json
+# tmp outputs
 /tmp/

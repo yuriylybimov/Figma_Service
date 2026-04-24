@@ -282,3 +282,145 @@ def plan_primitive_colors_from_project(
         encoding="utf-8",
     )
     typer.echo(f"\nProposal written to: {out_path}")
+
+
+_HEX_RE = __import__("re").compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _validate_normalized(colors: list[dict]) -> list[str]:
+    """Return a list of error strings; empty means valid."""
+    errors: list[str] = []
+    required = ("hex", "candidate_name", "auto_name", "final_name")
+    seen_final: dict[str, int] = {}
+
+    for i, entry in enumerate(colors):
+        ref = entry.get("hex") or f"entry[{i}]"
+
+        for field in required:
+            if field not in entry:
+                errors.append(f"{ref}: missing required field '{field}'")
+
+        hex_ = entry.get("hex", "")
+        if hex_ and not _HEX_RE.match(hex_):
+            errors.append(f"{ref}: 'hex' must be #rrggbb, got {hex_!r}")
+
+        final = entry.get("final_name", "")
+        if final:
+            if not final.startswith("color/"):
+                errors.append(f"{ref}: 'final_name' must start with 'color/', got {final!r}")
+            elif final.startswith("color/candidate/"):
+                errors.append(f"{ref}: 'final_name' must not start with 'color/candidate/', got {final!r}")
+
+            if final in seen_final:
+                errors.append(
+                    f"{ref}: duplicate 'final_name' {final!r} (also used by entry[{seen_final[final]}])"
+                )
+            else:
+                seen_final[final] = i
+
+    return errors
+
+
+@plan_app.command("validate-normalized")
+def plan_validate_normalized(
+    normalized: str = typer.Option(
+        str(_TOKENS_DIR / "primitives.normalized.json"),
+        "--normalized",
+        help="Path to normalized JSON written by `plan primitive-colors-normalized`.",
+    ),
+) -> None:
+    """Validate primitives.normalized.json before sync. Exits non-zero on any error."""
+    normalized_path = Path(normalized).resolve()
+    if not normalized_path.exists():
+        typer.echo(f"ERROR: file not found: {normalized_path}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        data = json.loads(normalized_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read file: {e}", err=True)
+        raise typer.Exit(1)
+
+    if "colors" not in data:
+        typer.echo("ERROR: missing required key 'colors'", err=True)
+        raise typer.Exit(1)
+
+    errors = _validate_normalized(data["colors"])
+    if errors:
+        for msg in errors:
+            typer.echo(f"ERROR: {msg}", err=True)
+        typer.echo(f"\n{len(errors)} error(s) found. Fix before syncing.", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"OK: {len(data['colors'])} entries valid.")
+
+
+@plan_app.command("primitive-colors-normalized")
+def plan_primitive_colors_normalized(
+    proposal: str = typer.Option(..., "--proposed", help="Path to proposal JSON written by `plan primitive-colors-from-project`."),
+    overrides: str = typer.Option(
+        str(_TOKENS_DIR / "overrides.normalized.json"),
+        "--overrides",
+        help="Path to overrides JSON (hex→name map). Default: tokens/overrides.normalized.json.",
+    ),
+    out: str = typer.Option(
+        str(_TOKENS_DIR / "primitives.normalized.json"),
+        "--out",
+        help="Output path for normalized proposal (default: tokens/primitives.normalized.json).",
+    ),
+) -> None:
+    """Assign auto color names to new_candidate colors; apply overrides; write normalized proposal."""
+    proposal_path = Path(proposal).resolve()
+    if not proposal_path.exists():
+        raise typer.BadParameter(f"Proposal file not found: {proposal_path}")
+
+    try:
+        proposal_data = json.loads(proposal_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        raise typer.BadParameter(f"Failed to read proposal file: {e}")
+
+    if "colors" not in proposal_data:
+        raise typer.BadParameter("Proposal file missing required key: 'colors'")
+
+    overrides_path = Path(overrides).resolve()
+    if overrides_path.exists():
+        try:
+            overrides_map: dict[str, str] = json.loads(overrides_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            raise typer.BadParameter(f"Failed to read overrides file: {e}")
+    else:
+        overrides_map = {}
+
+    candidates = [c for c in proposal_data["colors"] if c["status"] == "new_candidate"]
+    normalized = _build_normalized_entries(candidates, overrides=overrides_map)
+
+    override_count = sum(1 for e in normalized if e["final_name"] != e["auto_name"])
+
+    typer.echo(f"\nNormalization Summary")
+    typer.echo(f"  Candidates: {len(normalized)}")
+    typer.echo(f"  Overrides applied: {override_count}")
+    typer.echo(f"\nNormalized names:")
+    for e in normalized:
+        marker = " (override)" if e["final_name"] != e["auto_name"] else ""
+        typer.echo(f"  {e['hex']}  {e['final_name']}{marker}")
+
+    out_path = Path(out).resolve()
+    if out_path.exists():
+        typer.echo(f"\nWARNING: overwriting existing file: {out_path}")
+
+    result = {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source_proposal_file": str(proposal_path),
+        "source_overrides_file": str(overrides_path),
+        "summary": {
+            "candidates": len(normalized),
+            "overrides_applied": override_count,
+        },
+        "colors": normalized,
+    }
+
+    out_path.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    typer.echo(f"\nNormalized proposal written to: {out_path}")

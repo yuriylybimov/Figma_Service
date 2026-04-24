@@ -308,3 +308,434 @@ def test_build_normalized_entries_override_applied():
     result = _build_normalized_entries(candidates, overrides={"#2f2f2f": "color/neutral/900"})
     assert result[0]["final_name"] == "color/neutral/900"
     assert result[0]["auto_name"] != "color/neutral/900"
+
+
+# --- integration: primitive-colors-normalized command ---
+
+_PROPOSAL = {
+    "generated_at": "2025-01-01T00:00:00+00:00",
+    "source_usage_file": "/tmp/usage.json",
+    "scanned_pages": 1,
+    "scanned_nodes": 50,
+    "summary": {
+        "unique_node_colors": 3,
+        "matched_to_primitives": 1,
+        "from_paint_styles": 1,
+        "new_candidates": 1,
+    },
+    "colors": [
+        {
+            "hex": "#ffffff", "fill_count": 50, "stroke_count": 0,
+            "status": "matched", "primitive_name": "color/base/white",
+            "paint_style_name": None, "duplicate_warning": False, "examples": [],
+        },
+        {
+            "hex": "#3b82f6", "fill_count": 10, "stroke_count": 2,
+            "status": "paint_style", "primitive_name": None,
+            "paint_style_name": "brand/primary", "duplicate_warning": False, "examples": [],
+        },
+        {
+            "hex": "#ef4444", "fill_count": 5, "stroke_count": 0,
+            "status": "new_candidate", "primitive_name": None,
+            "paint_style_name": None, "duplicate_warning": False, "examples": [],
+        },
+    ],
+}
+
+
+def test_normalized_command_writes_output(tmp_path):
+    proposal_file = tmp_path / "primitives.proposed.json"
+    proposal_file.write_text(json.dumps(_PROPOSAL), encoding="utf-8")
+    out_file = tmp_path / "primitives.normalized.json"
+
+    result = runner.invoke(app, [
+        "plan", "primitive-colors-normalized",
+        "--proposed", str(proposal_file),
+        "--out", str(out_file),
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert out_file.exists()
+    data = json.loads(out_file.read_text())
+    assert data["summary"]["candidates"] == 1
+    assert len(data["colors"]) == 1
+    assert data["colors"][0]["hex"] == "#ef4444"
+
+
+def test_normalized_command_only_processes_new_candidates(tmp_path):
+    proposal_file = tmp_path / "primitives.proposed.json"
+    proposal_file.write_text(json.dumps(_PROPOSAL), encoding="utf-8")
+    out_file = tmp_path / "primitives.normalized.json"
+
+    runner.invoke(app, [
+        "plan", "primitive-colors-normalized",
+        "--proposed", str(proposal_file),
+        "--out", str(out_file),
+    ])
+
+    data = json.loads(out_file.read_text())
+    hexes = [c["hex"] for c in data["colors"]]
+    assert "#ffffff" not in hexes
+    assert "#3b82f6" not in hexes
+
+
+def test_normalized_command_applies_overrides(tmp_path):
+    proposal_file = tmp_path / "primitives.proposed.json"
+    proposal_file.write_text(json.dumps(_PROPOSAL), encoding="utf-8")
+    overrides_file = tmp_path / "overrides.normalized.json"
+    # Use a name that differs from the auto-assigned one to confirm override takes effect
+    overrides_file.write_text(json.dumps({"#ef4444": "color/error/default"}), encoding="utf-8")
+    out_file = tmp_path / "primitives.normalized.json"
+
+    runner.invoke(app, [
+        "plan", "primitive-colors-normalized",
+        "--proposed", str(proposal_file),
+        "--overrides", str(overrides_file),
+        "--out", str(out_file),
+    ])
+
+    data = json.loads(out_file.read_text())
+    assert data["colors"][0]["final_name"] == "color/error/default"
+    assert data["summary"]["overrides_applied"] == 1
+
+
+def test_normalized_command_empty_overrides_file(tmp_path):
+    proposal_file = tmp_path / "primitives.proposed.json"
+    proposal_file.write_text(json.dumps(_PROPOSAL), encoding="utf-8")
+    overrides_file = tmp_path / "overrides.normalized.json"
+    overrides_file.write_text("{}", encoding="utf-8")
+    out_file = tmp_path / "primitives.normalized.json"
+
+    result = runner.invoke(app, [
+        "plan", "primitive-colors-normalized",
+        "--proposed", str(proposal_file),
+        "--overrides", str(overrides_file),
+        "--out", str(out_file),
+    ])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(out_file.read_text())
+    assert data["summary"]["overrides_applied"] == 0
+
+
+def test_normalized_command_missing_overrides_uses_empty(tmp_path):
+    proposal_file = tmp_path / "primitives.proposed.json"
+    proposal_file.write_text(json.dumps(_PROPOSAL), encoding="utf-8")
+    out_file = tmp_path / "primitives.normalized.json"
+    nonexistent_overrides = tmp_path / "no_overrides.json"
+
+    result = runner.invoke(app, [
+        "plan", "primitive-colors-normalized",
+        "--proposed", str(proposal_file),
+        "--overrides", str(nonexistent_overrides),
+        "--out", str(out_file),
+    ])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(out_file.read_text())
+    assert data["summary"]["overrides_applied"] == 0
+
+
+def test_normalized_command_missing_proposal_file(tmp_path):
+    result = runner.invoke(app, [
+        "plan", "primitive-colors-normalized",
+        "--proposal", str(tmp_path / "nonexistent.json"),
+        "--out", str(tmp_path / "out.json"),
+    ])
+    assert result.exit_code != 0
+
+
+def test_normalized_command_malformed_proposal_file(tmp_path):
+    proposal_file = tmp_path / "primitives.proposed.json"
+    proposal_file.write_text('{"bad": true}', encoding="utf-8")
+    result = runner.invoke(app, [
+        "plan", "primitive-colors-normalized",
+        "--proposed", str(proposal_file),
+        "--out", str(tmp_path / "out.json"),
+    ])
+    assert result.exit_code != 0
+
+
+def test_normalized_command_warns_on_overwrite(tmp_path):
+    proposal_file = tmp_path / "primitives.proposed.json"
+    proposal_file.write_text(json.dumps(_PROPOSAL), encoding="utf-8")
+    out_file = tmp_path / "primitives.normalized.json"
+    out_file.write_text("old content", encoding="utf-8")
+
+    result = runner.invoke(app, [
+        "plan", "primitive-colors-normalized",
+        "--proposed", str(proposal_file),
+        "--out", str(out_file),
+    ])
+
+    assert "WARNING: overwriting" in result.output
+    data = json.loads(out_file.read_text())
+    assert "colors" in data
+
+
+def test_normalized_output_contains_auto_name_and_candidate_name(tmp_path):
+    proposal_file = tmp_path / "primitives.proposed.json"
+    proposal_file.write_text(json.dumps(_PROPOSAL), encoding="utf-8")
+    out_file = tmp_path / "primitives.normalized.json"
+
+    runner.invoke(app, [
+        "plan", "primitive-colors-normalized",
+        "--proposed", str(proposal_file),
+        "--out", str(out_file),
+    ])
+
+    data = json.loads(out_file.read_text())
+    entry = data["colors"][0]
+    assert "auto_name" in entry
+    assert "candidate_name" in entry
+    assert entry["candidate_name"] == "color/candidate/ef4444"
+
+
+# --- _validate_normalized unit tests ---
+
+def _valid_entry(hex_="#ef4444", final_name="color/red/500"):
+    return {
+        "hex": hex_,
+        "candidate_name": f"color/candidate/{hex_.lstrip('#')}",
+        "auto_name": "color/red/500",
+        "final_name": final_name,
+    }
+
+
+def test_validate_normalized_valid():
+    errors = ph._validate_normalized([_valid_entry()])
+    assert errors == []
+
+
+def test_validate_normalized_missing_required_field():
+    entry = _valid_entry()
+    del entry["auto_name"]
+    errors = ph._validate_normalized([entry])
+    assert any("auto_name" in e for e in errors)
+
+
+def test_validate_normalized_bad_hex_format():
+    entry = _valid_entry(hex_="ef4444")  # missing #
+    errors = ph._validate_normalized([entry])
+    assert any("hex" in e for e in errors)
+
+
+def test_validate_normalized_bad_hex_wrong_length():
+    entry = _valid_entry(hex_="#ef44")
+    errors = ph._validate_normalized([entry])
+    assert any("hex" in e for e in errors)
+
+
+def test_validate_normalized_final_name_no_color_prefix():
+    entry = _valid_entry(final_name="brand/primary")
+    errors = ph._validate_normalized([entry])
+    assert any("final_name" in e for e in errors)
+
+
+def test_validate_normalized_final_name_candidate_prefix_rejected():
+    entry = _valid_entry(final_name="color/candidate/ef4444")
+    errors = ph._validate_normalized([entry])
+    assert any("candidate" in e for e in errors)
+
+
+def test_validate_normalized_duplicate_final_name():
+    entries = [_valid_entry("#ef4444", "color/red/500"), _valid_entry("#cc0000", "color/red/500")]
+    errors = ph._validate_normalized(entries)
+    assert any("duplicate" in e for e in errors)
+
+
+def test_validate_normalized_multiple_errors_all_reported():
+    entry = {"hex": "bad", "candidate_name": "x", "auto_name": "x", "final_name": "brand/x"}
+    errors = ph._validate_normalized([entry])
+    assert len(errors) >= 2  # bad hex + bad final_name prefix
+
+
+# --- validate-normalized CLI tests ---
+
+def _write_normalized(path, colors):
+    path.write_text(json.dumps({"generated_at": "2025-01-01T00:00:00+00:00", "colors": colors}), encoding="utf-8")
+
+
+def test_validate_normalized_command_passes_valid(tmp_path):
+    f = tmp_path / "primitives.normalized.json"
+    _write_normalized(f, [_valid_entry()])
+    result = runner.invoke(app, ["plan", "validate-normalized", "--normalized", str(f)])
+    assert result.exit_code == 0
+    assert "OK" in result.output
+
+
+def test_validate_normalized_command_fails_on_missing_file(tmp_path):
+    result = runner.invoke(app, [
+        "plan", "validate-normalized",
+        "--normalized", str(tmp_path / "nonexistent.json"),
+    ])
+    assert result.exit_code != 0
+
+
+def test_validate_normalized_command_fails_on_missing_colors_key(tmp_path):
+    f = tmp_path / "primitives.normalized.json"
+    f.write_text(json.dumps({"generated_at": "2025-01-01T00:00:00+00:00"}), encoding="utf-8")
+    result = runner.invoke(app, ["plan", "validate-normalized", "--normalized", str(f)])
+    assert result.exit_code != 0
+
+
+def test_validate_normalized_command_prints_errors_and_exits_nonzero(tmp_path):
+    f = tmp_path / "primitives.normalized.json"
+    bad_entry = _valid_entry()
+    bad_entry["final_name"] = "color/candidate/ef4444"
+    _write_normalized(f, [bad_entry])
+    result = runner.invoke(app, ["plan", "validate-normalized", "--normalized", str(f)])
+    assert result.exit_code != 0
+    assert "ERROR" in (result.output + (result.stderr or ""))
+
+
+# --- sync primitive-colors-normalized (host-side only) ---
+# These tests exercise the Python command layer only: argument parsing, file
+# validation, JS placeholder substitution, and call ordering.
+# _run_validation and _dispatch_sync are both mocked — no browser, no Figma.
+
+_NORMALIZED_DATA = {
+    "generated_at": "2025-01-01T00:00:00+00:00",
+    "summary": {"candidates": 2, "overrides_applied": 0},
+    "colors": [
+        {
+            "hex": "#ef4444",
+            "candidate_name": "color/candidate/ef4444",
+            "auto_name": "color/red/500",
+            "final_name": "color/red/500",
+            "fill_count": 5,
+            "stroke_count": 0,
+            "examples": [],
+        },
+        {
+            "hex": "#3b82f6",
+            "candidate_name": "color/candidate/3b82f6",
+            "auto_name": "color/blue/500",
+            "final_name": "color/blue/500",
+            "fill_count": 10,
+            "stroke_count": 2,
+            "examples": [],
+        },
+    ],
+}
+
+
+def _write_normalized_file(path, data=None):
+    path.write_text(json.dumps(data or _NORMALIZED_DATA), encoding="utf-8")
+
+
+def _patch_sync(monkeypatch):
+    """Patch _run_validation and _dispatch_sync; return a dict that collects calls."""
+    calls = {"validate": 0, "dispatch": [], "dispatch_kwargs": []}
+    monkeypatch.setattr("sync_handlers._run_validation", lambda **kw: calls.update(validate=calls["validate"] + 1))
+    monkeypatch.setattr(
+        "sync_handlers._dispatch_sync",
+        lambda user_js, **kw: calls["dispatch"].append(user_js) or calls["dispatch_kwargs"].append(kw),
+    )
+    return calls
+
+
+def test_sync_normalized_missing_file(tmp_path, monkeypatch):
+    _patch_sync(monkeypatch)
+    result = runner.invoke(app, [
+        "sync", "primitive-colors-normalized",
+        "--normalized", str(tmp_path / "nonexistent.json"),
+    ])
+    assert result.exit_code != 0
+
+
+def test_sync_normalized_missing_colors_key(tmp_path, monkeypatch):
+    _patch_sync(monkeypatch)
+    f = tmp_path / "primitives.normalized.json"
+    f.write_text('{"generated_at": "x"}', encoding="utf-8")
+    result = runner.invoke(app, [
+        "sync", "primitive-colors-normalized",
+        "--normalized", str(f),
+    ])
+    assert result.exit_code != 0
+
+
+def test_sync_normalized_dry_run_injects_true(tmp_path, monkeypatch):
+    calls = _patch_sync(monkeypatch)
+    f = tmp_path / "primitives.normalized.json"
+    _write_normalized_file(f)
+
+    result = runner.invoke(app, [
+        "sync", "primitive-colors-normalized",
+        "--normalized", str(f),
+        "--dry-run",
+    ])
+
+    assert result.exit_code == 0, result.output
+    js = calls["dispatch"][0]
+    assert "true" in js
+    assert "__DRY_RUN__" not in js
+
+
+def test_sync_normalized_real_run_injects_false(tmp_path, monkeypatch):
+    calls = _patch_sync(monkeypatch)
+    f = tmp_path / "primitives.normalized.json"
+    _write_normalized_file(f)
+
+    result = runner.invoke(app, [
+        "sync", "primitive-colors-normalized",
+        "--normalized", str(f),
+    ])
+
+    assert result.exit_code == 0, result.output
+    js = calls["dispatch"][0]
+    assert "false" in js
+    assert "__DRY_RUN__" not in js
+
+
+def test_sync_normalized_injects_all_entries(tmp_path, monkeypatch):
+    calls = _patch_sync(monkeypatch)
+    f = tmp_path / "primitives.normalized.json"
+    _write_normalized_file(f)
+
+    runner.invoke(app, [
+        "sync", "primitive-colors-normalized",
+        "--normalized", str(f),
+        "--dry-run",
+    ])
+
+    js = calls["dispatch"][0]
+    assert "#ef4444" in js
+    assert "#3b82f6" in js
+    assert "color/candidate/ef4444" in js
+    assert "color/red/500" in js
+
+
+def test_sync_normalized_no_raw_placeholder_in_js(tmp_path, monkeypatch):
+    calls = _patch_sync(monkeypatch)
+    f = tmp_path / "primitives.normalized.json"
+    _write_normalized_file(f)
+
+    runner.invoke(app, [
+        "sync", "primitive-colors-normalized",
+        "--normalized", str(f),
+        "--dry-run",
+    ])
+
+    js = calls["dispatch"][0]
+    assert "__NORMALIZED__" not in js
+    assert "__DRY_RUN__" not in js
+
+
+def test_sync_normalized_calls_validation_before_dispatch(tmp_path, monkeypatch):
+    call_order = []
+    monkeypatch.setattr("sync_handlers._run_validation", lambda **kw: call_order.append("validate"))
+    monkeypatch.setattr(
+        "sync_handlers._dispatch_sync",
+        lambda user_js, **kw: call_order.append("dispatch"),
+    )
+    f = tmp_path / "primitives.normalized.json"
+    _write_normalized_file(f)
+
+    runner.invoke(app, [
+        "sync", "primitive-colors-normalized",
+        "--normalized", str(f),
+        "--dry-run",
+    ])
+
+    assert call_order == ["validate", "dispatch"]

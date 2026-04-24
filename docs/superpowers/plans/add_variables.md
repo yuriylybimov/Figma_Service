@@ -20,6 +20,12 @@ This file is the control layer for variables automation.
 0 - rules
 (create naming + mapping rules)
 
+0.5 - discovery / planning
+- read color-usage-summary   → /tmp/usage.json
+- plan primitive-colors-from-project --usage /tmp/usage.json
+  → tokens/primitives.proposed.json
+- review proposal before proceeding to sync
+
 1 - primitives
 - sync_primitive_colors
 - sync_primitive_spacing
