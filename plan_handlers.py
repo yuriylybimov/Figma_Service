@@ -325,6 +325,43 @@ def _sort_colors(colors: list[dict]) -> list[dict]:
     )
 
 
+def _build_color_lookups(
+    primitive_variables: list[dict],
+    paint_styles: list[dict],
+) -> tuple[dict[str, str], dict[str, str], set[str], set[str], list[str]]:
+    """Build hex→name lookups for primitives and paint styles; collect duplicate warnings.
+
+    Returns (prim_lookup, style_lookup, dup_prim_hexes, dup_style_hexes, warnings).
+    Pure: no I/O, no printing.
+    """
+    warnings: list[str] = []
+
+    def _make_warn(source_label: str, dup_set: set[str]):
+        def warn(msg: str) -> None:
+            labelled = msg.replace(" — ", f" in {source_label} — ", 1)
+            warnings.append(labelled)
+            dup_set.add(msg.split("'")[1])
+        return warn
+
+    dup_prim: set[str] = set()
+    prim_lookup = _build_lookup(
+        primitive_variables,
+        key="hex",
+        value="name",
+        warn=_make_warn("primitive_variables", dup_prim),
+    )
+
+    dup_style: set[str] = set()
+    style_lookup = _build_lookup(
+        paint_styles,
+        key="hex",
+        value="name",
+        warn=_make_warn("paint_styles", dup_style),
+    )
+
+    return prim_lookup, style_lookup, dup_prim, dup_style, warnings
+
+
 def _classify_and_count(
     node_colors: list[dict],
     *,
@@ -557,36 +594,12 @@ def plan_primitive_colors_from_project(
         if key not in data:
             raise typer.BadParameter(f"Usage file missing required key: {key!r}")
 
-    warnings: list[str] = []
-
-    # Build lookups — track duplicate hexes for duplicate_warning flag.
-    # _build_lookup is the sole duplicate-detection path; the warn callback
-    # splices the source label into its message and records the hex in dup_set.
-    # _build_lookup message format: "WARNING: duplicate hex '#rrggbb' — keeping … ignoring …"
-    def _make_warn(source_label: str, dup_set: set[str]):
-        def warn(msg: str) -> None:
-            labelled = msg.replace(" — ", f" in {source_label} — ", 1)
-            warnings.append(labelled)
-            typer.echo(labelled)
-            # hex is the second single-quoted token in the message
-            dup_set.add(msg.split("'")[1])
-        return warn
-
-    dup_prim: set[str] = set()
-    prim_seen = _build_lookup(
+    prim_seen, style_seen, dup_prim, dup_style, warnings = _build_color_lookups(
         data["primitive_variables"],
-        key="hex",
-        value="name",
-        warn=_make_warn("primitive_variables", dup_prim),
-    )
-
-    dup_style: set[str] = set()
-    style_seen = _build_lookup(
         data["paint_styles"],
-        key="hex",
-        value="name",
-        warn=_make_warn("paint_styles", dup_style),
     )
+    for w in warnings:
+        typer.echo(w)
 
     sorted_colors, matched, paint_style_count, new_candidates, unique = _classify_and_count(
         data["node_colors"],
