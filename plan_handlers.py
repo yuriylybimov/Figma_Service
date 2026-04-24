@@ -525,30 +525,34 @@ def plan_primitive_colors_from_project(
 
     warnings: list[str] = []
 
-    # Build lookups — track duplicate hexes for duplicate_warning flag
-    prim_seen: dict[str, str] = {}
-    dup_prim: set[str] = set()
-    for item in data["primitive_variables"]:
-        h = item["hex"]
-        if h in prim_seen:
-            msg = f"WARNING: duplicate hex {h!r} in primitive_variables — keeping {prim_seen[h]!r}, ignoring {item['name']!r}"
-            warnings.append(msg)
-            typer.echo(msg)
-            dup_prim.add(h)
-        else:
-            prim_seen[h] = item["name"]
+    # Build lookups — track duplicate hexes for duplicate_warning flag.
+    # _build_lookup is the sole duplicate-detection path; the warn callback
+    # splices the source label into its message and records the hex in dup_set.
+    # _build_lookup message format: "WARNING: duplicate hex '#rrggbb' — keeping … ignoring …"
+    def _make_warn(source_label: str, dup_set: set[str]):
+        def warn(msg: str) -> None:
+            labelled = msg.replace(" — ", f" in {source_label} — ", 1)
+            warnings.append(labelled)
+            typer.echo(labelled)
+            # hex is the second single-quoted token in the message
+            dup_set.add(msg.split("'")[1])
+        return warn
 
-    style_seen: dict[str, str] = {}
+    dup_prim: set[str] = set()
+    prim_seen = _build_lookup(
+        data["primitive_variables"],
+        key="hex",
+        value="name",
+        warn=_make_warn("primitive_variables", dup_prim),
+    )
+
     dup_style: set[str] = set()
-    for item in data["paint_styles"]:
-        h = item["hex"]
-        if h in style_seen:
-            msg = f"WARNING: duplicate hex {h!r} in paint_styles — keeping {style_seen[h]!r}, ignoring {item['name']!r}"
-            warnings.append(msg)
-            typer.echo(msg)
-            dup_style.add(h)
-        else:
-            style_seen[h] = item["name"]
+    style_seen = _build_lookup(
+        data["paint_styles"],
+        key="hex",
+        value="name",
+        warn=_make_warn("paint_styles", dup_style),
+    )
 
     classified = _classify_colors(
         data["node_colors"],
