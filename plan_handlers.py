@@ -518,6 +518,33 @@ def _cleanup_candidates(
     return result
 
 
+def _build_primitive_color_plan(
+    *,
+    usage_path: Path,
+    scanned_pages,
+    scanned_nodes,
+    unique: int,
+    matched: int,
+    paint_style_count: int,
+    new_candidates: int,
+    sorted_colors: list[dict],
+) -> dict:
+    """Build the proposal dict written to primitives.proposed.json."""
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source_usage_file": str(usage_path),
+        "scanned_pages": scanned_pages,
+        "scanned_nodes": scanned_nodes,
+        "summary": {
+            "unique_node_colors": unique,
+            "matched_to_primitives": matched,
+            "from_paint_styles": paint_style_count,
+            "new_candidates": new_candidates,
+        },
+        "colors": sorted_colors,
+    }
+
+
 @plan_app.command("cleanup-candidates")
 def plan_cleanup_candidates(
     proposed: str = typer.Option(..., "--proposed", help="Path to primitives.proposed.json."),
@@ -642,19 +669,16 @@ def plan_primitive_colors_from_project(
     if out_path.exists():
         typer.echo(f"\nWARNING: overwriting existing proposal: {out_path}")
 
-    proposal = {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "source_usage_file": str(usage_path),
-        "scanned_pages": scanned_pages,
-        "scanned_nodes": scanned_nodes,
-        "summary": {
-            "unique_node_colors": unique,
-            "matched_to_primitives": matched,
-            "from_paint_styles": paint_style_count,
-            "new_candidates": new_candidates,
-        },
-        "colors": sorted_colors,
-    }
+    proposal = _build_primitive_color_plan(
+        usage_path=usage_path,
+        scanned_pages=scanned_pages,
+        scanned_nodes=scanned_nodes,
+        unique=unique,
+        matched=matched,
+        paint_style_count=paint_style_count,
+        new_candidates=new_candidates,
+        sorted_colors=sorted_colors,
+    )
 
     out_path.write_text(
         json.dumps(proposal, ensure_ascii=False, indent=2) + "\n",
