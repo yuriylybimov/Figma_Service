@@ -198,6 +198,26 @@ def _fmt_group_block(normalized: list[dict]) -> list[str]:
     return lines
 
 
+def _fmt_color_usage_summary_lines(
+    *,
+    scanned_nodes,
+    scanned_pages,
+    unique: int,
+    matched: int,
+    paint_style_count: int,
+    new_candidates: int,
+) -> list[str]:
+    """Return the Color Usage Summary lines (without top-colors block)."""
+    return [
+        f"\nColor Usage Summary",
+        f"  Scanned: {scanned_nodes} nodes across {scanned_pages} pages",
+        f"  Unique colors: {unique}",
+        f"  Matched to primitives: {matched}",
+        f"  From paint styles: {paint_style_count}",
+        f"  New candidates: {new_candidates}",
+    ]
+
+
 def _fmt_top_color_lines(sorted_colors: list[dict], *, limit: int = 10) -> list[str]:
     """Return formatted lines for the top-N colors by usage."""
     lines: list[str] = []
@@ -654,12 +674,15 @@ def plan_primitive_colors_from_project(
     # Console summary
     scanned_nodes = data.get("scanned_nodes", "?")
     scanned_pages = data.get("scanned_pages", "?")
-    typer.echo(f"\nColor Usage Summary")
-    typer.echo(f"  Scanned: {scanned_nodes} nodes across {scanned_pages} pages")
-    typer.echo(f"  Unique colors: {unique}")
-    typer.echo(f"  Matched to primitives: {matched}")
-    typer.echo(f"  From paint styles: {paint_style_count}")
-    typer.echo(f"  New candidates: {new_candidates}")
+    for line in _fmt_color_usage_summary_lines(
+        scanned_nodes=scanned_nodes,
+        scanned_pages=scanned_pages,
+        unique=unique,
+        matched=matched,
+        paint_style_count=paint_style_count,
+        new_candidates=new_candidates,
+    ):
+        typer.echo(line)
     typer.echo(f"\nTop colors by usage:")
     for line in _fmt_top_color_lines(sorted_colors):
         typer.echo(line)
