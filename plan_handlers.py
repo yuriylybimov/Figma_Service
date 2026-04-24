@@ -87,6 +87,12 @@ def _color_group(hue: float, saturation: float, lightness: float = 0.5) -> str:
     return "gray"
 
 
+def _hex_to_group(hex_: str) -> str:
+    """Return the color group name for a hex string (e.g. 'gray', 'blue', 'red')."""
+    hue, lightness, sat = _hex_to_hls(hex_)
+    return _color_group(hue, sat, lightness)
+
+
 def _assign_scales(lightness_values: list[float]) -> list[int]:
     """Map N lightness values (same-group, in input order) → 100-900 scale integers.
 
@@ -240,7 +246,7 @@ def _build_normalized_entries(
     groups: dict[str, list] = {}
     for idx, c in enumerate(non_fixed):
         hue, lightness, sat = _hex_to_hls(c["hex"])
-        group = _color_group(hue, sat, lightness)
+        group = _hex_to_group(c["hex"])
         groups.setdefault(group, []).append((idx, c, lightness))
 
     for group_name, members in groups.items():
@@ -317,6 +323,34 @@ def _sort_colors(colors: list[dict]) -> list[dict]:
             c["hex"],
         ),
     )
+
+
+def _classify_and_count(
+    node_colors: list[dict],
+    *,
+    prim_lookup: dict[str, str],
+    style_lookup: dict[str, str],
+    dup_prim_hexes: set[str],
+    dup_style_hexes: set[str],
+) -> tuple[list[dict], int, int, int, int]:
+    """Classify, sort, and count colors by status.
+
+    Returns (sorted_colors, matched, paint_style_count, new_candidates, unique).
+    Pure: no I/O, no side effects.
+    """
+    classified = _classify_colors(
+        node_colors,
+        prim_lookup=prim_lookup,
+        style_lookup=style_lookup,
+        dup_prim_hexes=dup_prim_hexes,
+        dup_style_hexes=dup_style_hexes,
+    )
+    sorted_colors = _sort_colors(classified)
+    matched = sum(1 for c in sorted_colors if c["status"] == "matched")
+    paint_style_count = sum(1 for c in sorted_colors if c["status"] == "paint_style")
+    new_candidates = sum(1 for c in sorted_colors if c["status"] == "new_candidate")
+    unique = len(sorted_colors)
+    return sorted_colors, matched, paint_style_count, new_candidates, unique
 
 
 def _apply_use_counts(
@@ -554,19 +588,13 @@ def plan_primitive_colors_from_project(
         warn=_make_warn("paint_styles", dup_style),
     )
 
-    classified = _classify_colors(
+    sorted_colors, matched, paint_style_count, new_candidates, unique = _classify_and_count(
         data["node_colors"],
         prim_lookup=prim_seen,
         style_lookup=style_seen,
         dup_prim_hexes=dup_prim,
         dup_style_hexes=dup_style,
     )
-    sorted_colors = _sort_colors(classified)
-
-    matched = sum(1 for c in sorted_colors if c["status"] == "matched")
-    paint_style_count = sum(1 for c in sorted_colors if c["status"] == "paint_style")
-    new_candidates = sum(1 for c in sorted_colors if c["status"] == "new_candidate")
-    unique = len(sorted_colors)
 
     # Console summary
     scanned_nodes = data.get("scanned_nodes", "?")
@@ -949,8 +977,7 @@ def _suggest_merge_overrides(
         hex_ = c["hex"]
         if hex_.lower() in excluded_from_groups:
             continue
-        hue, lightness, sat = _hex_to_hls(hex_)
-        group = _color_group(hue, sat, lightness)
+        group = _hex_to_group(hex_)
         groups.setdefault(group, []).append(c)
 
     suggestions: list[dict] = []
@@ -1054,8 +1081,7 @@ def plan_suggest_merge_overrides(
     for c in colors:
         if c["hex"].lower() in _FORBIDDEN_MERGE_HEXES:
             continue
-        hue, lightness, sat = _hex_to_hls(c["hex"])
-        g = _color_group(hue, sat, lightness)
+        g = _hex_to_group(c["hex"])
         groups_seen[g] = groups_seen.get(g, 0) + 1
     overflowing = sum(1 for v in groups_seen.values() if v > 9)
 
