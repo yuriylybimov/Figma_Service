@@ -1,7 +1,9 @@
 {
-  "color/text/default": "color/gray/900",
-  "color/text/disabled": "color/gray/500",
-  "color/surface/default": "color/gray/100",
-  "color/border/default": "color/gray/500",
-  "color/background/default": "color/gray/100"
+  "color/text/primary": "color/gray/900",
+  "color/text/inverse": "color/white",
+  "color/border/primary": "color/gray/400",
+  "color/canvas/primary": "color/white",
+  "color/surface/primary": "color/white",
+  "color/surface/secondary": "color/gray/100",
+  "color/accent/primary": "color/gray/900"
 }

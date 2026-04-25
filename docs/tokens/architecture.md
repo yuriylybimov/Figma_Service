@@ -227,7 +227,7 @@ Validation must run and pass before any sync command is allowed to proceed.
 
 ## Semantic Tokens
 
-Semantic tokens are intent-named aliases pointing to primitives (e.g. `color/text/default → color/gray/900`). They live one layer above primitives and may **only** alias primitives — never raw hex, never other semantics.
+Semantic tokens are intent-named aliases pointing to primitives (e.g. `color/text/primary → color/gray/900`). They live one layer above primitives and may **only** alias primitives — never raw hex, never other semantics.
 
 ### Naming format
 
@@ -239,10 +239,16 @@ Strict enums (a name with any value outside these sets is invalid):
 
 | Field | Allowed values |
 |---|---|
-| `role` | `text`, `surface`, `border`, `background`, `icon`, `brand`, `accent` |
-| `state` | `default`, `hover`, `focus`, `disabled`, `active` |
+| `role` | `text`, `surface`, `border`, `canvas`, `icon`, `accent` |
+| `state` | `primary`, `secondary`, `disabled` |
 
-Examples: `color/text/default`, `color/surface/hover`, `color/border/disabled`.
+Examples: `color/text/primary`, `color/surface/secondary`, `color/border/disabled`.
+
+**Auto-suggestion scope.** `plan semantic-tokens-normalized` auto-generates suggestions only for `text/*`, `surface/*`, `border/*`, and `canvas/*`. The `icon` and `accent` roles are reserved — they are never auto-generated and must be provided explicitly via seed or override.
+
+**Luminance-driven mapping.** Semantic suggestions are determined by computed luminance from the primitive hex value, not by scale name. `gray/400` can win over `gray/500` if its luminance is closer to the target. Do not assume scale numbers proxy luminance.
+
+**Light theme only.** The semantic mapping system currently assumes a light theme (light = canvas, dark = text). Theme-aware or dark-mode mapping is not implemented.
 
 ### Files
 
@@ -256,9 +262,9 @@ All three files are flat JSON objects of the form:
 
 ```json
 {
-  "color/text/default":    "color/gray/900",
-  "color/text/disabled":   "color/gray/400",
-  "color/surface/default": "color/white"
+  "color/text/primary":    "color/gray/900",
+  "color/text/disabled":   "color/gray/700",
+  "color/canvas/primary":  "color/gray/50"
 }
 ```
 
@@ -289,6 +295,92 @@ The command fails fast on the first violation, exits non-zero, and writes nothin
 4. No value is a raw hex (e.g. `#1a2b3c`) — semantics may not store raw values.
 5. No value is itself a semantic name from the resolved map (no semantic-to-semantic aliasing).
 6. Names are unique (enforced by JSON object semantics; duplicate keys are a parse error).
+
+### Context-Aware Semantic Suggestions
+
+The system may generate semantic token suggestions informed by actual color usage
+context from the Figma file. These suggestions are governed by strict guardrails.
+
+#### Proposal-only
+
+- Context-aware suggestions are **never written directly to `tokens/semantics.seed.json`**.
+- They are written to a separate file: `tokens/semantics.contextual.json`.
+- A human must review each suggestion and manually copy confirmed entries into
+  `tokens/semantics.seed.json`.
+- `plan semantic-tokens-normalized` remains the only command that writes
+  `tokens/semantics.normalized.json`.
+
+#### Required suggestion fields
+
+Every suggestion in `tokens/semantics.contextual.json` must include:
+
+| Field | Type | Description |
+|---|---|---|
+| `semantic_name` | string | e.g. `color/border/primary` |
+| `primitive_name` | string | Alias target; must exist in `primitives.normalized.json` |
+| `confidence` | `"high"` / `"medium"` / `"low"` | See confidence rules below |
+| `reason` | string | Plain-language explanation of why this role was inferred |
+| `usage_examples` | array | Up to 5 sample nodes from Figma with name, type, role, page |
+| `warnings` | array | Non-empty when the same color plays multiple roles or signals conflict |
+
+Suggestions without all six fields are invalid and must not be written.
+
+#### Confidence rules
+
+Confidence is **not** a single-signal score. It must be downgraded when any of
+the following conditions apply:
+
+- The suggestion is based on `dominant_role` alone with no supporting context
+- The only node names are generic: `Frame`, `Group`, `Container`, `Rectangle`,
+  `Layer`, or any unnamed node (`""`)
+- The color appears in multiple distinct roles (e.g., both text and stroke)
+- The usage count is below 10
+- All sample nodes come from a single component or a single page
+
+Generic node names may be included as evidence in `usage_examples`, but they
+must not be the sole basis for `confidence: "high"`. High confidence requires
+at least one of: a semantically named node (e.g. `left navigation`, `search bar`),
+a meaningful component name, or an unambiguous fill/stroke/text split.
+
+#### Multi-signal requirement
+
+A suggestion's role inference must consider all available signals together:
+
+- Fill / stroke / text_fill distribution
+- Node type (`TEXT`, `FRAME`, `RECTANGLE`, etc.)
+- Parent frame name
+- Component name (if node is an INSTANCE)
+- Usage frequency
+- Existing style or variable binding (if available)
+
+`dominant_role` alone is insufficient to assign a semantic role.
+
+**Canvas vs. surface disambiguation** (when fill is dominant and luminance > 0.92):
+- If any `parent_frame_name` contains `"dashboard"` or `"page"` → prefer `canvas/*`
+- If any `component_name` contains `"card"` or `"modal"` → prefer `surface/*`
+- Otherwise fall back to luminance: ≥ 0.97 → `canvas/*`, else `surface/*`
+
+**Multi-role warning threshold:**
+A warning is added only when the second-strongest role count is ≥ 30% of the
+dominant role count. Incidental secondary uses below that threshold do not warn.
+
+Example: dominant stroke = 100, fill = 35 (35%) → warn. Fill = 20 (20%) → no warn.
+
+#### Alias constraints
+
+All constraints from the main Semantic Tokens section apply:
+- `primitive_name` must exist in `primitives.normalized.json`
+- `primitive_name` must not be a raw hex or a semantic name
+- `semantic_name` must match `color/<role>/<state>` with valid role and state enums
+
+#### Files
+
+| File | Role | Written by |
+|---|---|---|
+| `tokens/color_usage_context.json` | Per-color enriched usage data from Figma | `read color-usage-context` |
+| `tokens/semantics.contextual.json` | Contextual suggestion proposals | `plan suggest-semantic-tokens-contextual` |
+
+---
 
 ### Sync
 

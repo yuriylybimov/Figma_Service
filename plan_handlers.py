@@ -49,6 +49,8 @@ from plan_colors import (  # noqa: F401
     _LOW_CHROMA_THRESHOLD,
     _audit_palette,
     _build_and_validate_semantic_normalized,
+    _suggest_semantic_tokens,
+    _suggest_semantic_tokens_contextual,
 )
 
 plan_app = typer.Typer(no_args_is_help=True, help="Host-side planning and proposal commands.")
@@ -678,3 +680,259 @@ def plan_semantic_tokens_normalized(
         encoding="utf-8",
     )
     typer.echo(f"OK: {len(sorted_resolved)} semantic token(s) written to {out_path}")
+
+
+@plan_app.command("suggest-semantic-tokens")
+def plan_suggest_semantic_tokens(
+    primitives: str = typer.Option(
+        str(_TOKENS_DIR / "primitives.normalized.json"),
+        "--primitives",
+        help="Path to primitives.normalized.json (default: tokens/primitives.normalized.json).",
+    ),
+    out: str | None = typer.Option(
+        None,
+        "--out",
+        help=(
+            "Optional path to write suggestions as JSON. Prints to stdout when omitted. "
+            "Never writes semantics.seed.json. "
+            "[EXPERIMENTAL] Output is a starting point only — review before using."
+        ),
+    ),
+) -> None:
+    """[EXPERIMENTAL] Suggest semantic token assignments from a normalized primitive palette.
+
+    Uses luminance-based heuristics to propose initial mappings. Output is advisory only —
+    review and copy relevant entries into semantics.seed.json manually.
+    Never writes semantics.seed.json or semantics.normalized.json.
+    """
+    primitives_path = Path(primitives).resolve()
+    if not primitives_path.exists():
+        typer.echo(f"ERROR: primitives file not found: {primitives_path}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        primitives_data = json.loads(primitives_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read primitives: {e}", err=True)
+        raise typer.Exit(1)
+
+    primitives_list = primitives_data.get("colors") if isinstance(primitives_data, dict) else None
+    if not isinstance(primitives_list, list):
+        typer.echo("ERROR: primitives file missing required 'colors' list.", err=True)
+        raise typer.Exit(1)
+
+    suggestions = _suggest_semantic_tokens(primitives_list)
+
+    typer.echo(f"\nSemantic token suggestions ({len(suggestions)} token(s)):")
+    for name, primitive in sorted(suggestions.items()):
+        typer.echo(f"  {name:<36}  →  {primitive}")
+
+    if not suggestions:
+        typer.echo("  (none — no qualifying gray primitives found)")
+
+    if out is not None:
+        out_path = Path(out).resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if out_path.exists():
+            typer.echo(f"\nWARNING: overwriting existing file: {out_path}")
+        result = {
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "source_primitives_file": str(primitives_path),
+            "suggestions": suggestions,
+        }
+        out_path.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        typer.echo(f"\nSuggestions written to: {out_path}")
+
+
+@plan_app.command("suggest-semantic-tokens-contextual")
+def plan_suggest_semantic_tokens_contextual(
+    context: str = typer.Option(
+        str(_TOKENS_DIR / "color_usage_context.json"),
+        "--context",
+        help="Path to color_usage_context.json from `read color-usage-context`.",
+    ),
+    primitives: str = typer.Option(
+        str(_TOKENS_DIR / "primitives.normalized.json"),
+        "--primitives",
+        help="Path to primitives.normalized.json.",
+    ),
+    out: str = typer.Option(
+        str(_TOKENS_DIR / "semantics.contextual.json"),
+        "--out",
+        help=(
+            "Output path for experimental suggestions (default: tokens/semantics.contextual.json). "
+            "[EXPERIMENTAL] Never set to semantics.seed.json or semantics.normalized.json."
+        ),
+    ),
+) -> None:
+    """[EXPERIMENTAL] Generate contextual semantic token suggestions from enriched Figma usage data.
+
+    Uses multi-signal analysis (fill/stroke/text ratios, confidence scoring) to propose
+    mappings. Output is advisory only — review and copy relevant entries into
+    semantics.seed.json manually.
+    Reads color_usage_context.json and primitives.normalized.json.
+    Writes a proposal to tokens/semantics.contextual.json — never writes
+    semantics.seed.json or semantics.normalized.json.
+    """
+    context_path = Path(context).resolve()
+    if not context_path.exists():
+        typer.echo(
+            f"ERROR: context file not found: {context_path}\n"
+            f"Run `read color-usage-context --out tokens/color_usage_context.json` first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    primitives_path = Path(primitives).resolve()
+    if not primitives_path.exists():
+        typer.echo(
+            f"ERROR: primitives file not found: {primitives_path}\n"
+            f"Run `plan primitive-colors-normalized` first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    try:
+        context_data = json.loads(context_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read context file: {e}", err=True)
+        raise typer.Exit(1)
+
+    if not isinstance(context_data, list):
+        typer.echo("ERROR: context file must be a JSON array.", err=True)
+        raise typer.Exit(1)
+
+    try:
+        primitives_data = json.loads(primitives_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read primitives file: {e}", err=True)
+        raise typer.Exit(1)
+
+    primitives_list = primitives_data.get("colors") if isinstance(primitives_data, dict) else None
+    if not isinstance(primitives_list, list):
+        typer.echo("ERROR: primitives file missing required 'colors' list.", err=True)
+        raise typer.Exit(1)
+
+    suggestions = _suggest_semantic_tokens_contextual(context_data, primitives_list)
+
+    typer.echo(f"\nContextual semantic suggestions ({len(suggestions)} token(s)):\n")
+    if suggestions:
+        col_sem  = max(len(s["semantic_name"])  for s in suggestions)
+        col_prim = max(len(s["primitive_name"]) for s in suggestions)
+        typer.echo(
+            f"  {'semantic_name':<{col_sem}}  {'primitive_name':<{col_prim}}  confidence"
+        )
+        typer.echo(f"  {'-' * col_sem}  {'-' * col_prim}  ----------")
+        for s in suggestions:
+            warn_flag = "  [!]" if s["warnings"] else ""
+            typer.echo(
+                f"  {s['semantic_name']:<{col_sem}}  {s['primitive_name']:<{col_prim}}"
+                f"  {s['confidence']}{warn_flag}"
+            )
+    else:
+        typer.echo("  (none — no qualifying colors found in context)")
+
+    out_path = Path(out).resolve()
+
+    # Guard: experimental suggestion commands must never overwrite production seed files.
+    _PROTECTED_NAMES = {"semantics.seed.json", "semantics.normalized.json"}
+    if out_path.name in _PROTECTED_NAMES:
+        typer.echo(
+            f"ERROR: --out {out_path} targets a protected production file.\n"
+            "Experimental suggestions must not overwrite semantics.seed.json or "
+            "semantics.normalized.json. Use a different output path (e.g. semantics.contextual.json).",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if out_path.exists():
+        typer.echo(f"\nWARNING: overwriting existing file: {out_path}")
+
+    result = {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source_context_file": str(context_path),
+        "source_primitives_file": str(primitives_path),
+        "suggestions": suggestions,
+    }
+
+    out_path.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    typer.echo(f"\nContextual suggestions written to: {out_path}")
+
+
+@plan_app.command("semantic-sync-dry-run")
+def plan_semantic_sync_dry_run(
+    semantics: str = typer.Option(
+        str(_TOKENS_DIR / "semantics.normalized.json"),
+        "--semantics",
+        help="Path to semantics.normalized.json.",
+    ),
+    primitives: str = typer.Option(
+        str(_TOKENS_DIR / "primitives.normalized.json"),
+        "--primitives",
+        help="Path to primitives.normalized.json.",
+    ),
+) -> None:
+    """Simulate semantic variable sync without writing to Figma.
+
+    Reads semantics.normalized.json and primitives.normalized.json, verifies
+    every semantic alias resolves to a known primitive, and prints the planned
+    create operations. Exits non-zero if any primitive is missing.
+    """
+    semantics_path = Path(semantics).resolve()
+    primitives_path = Path(primitives).resolve()
+
+    if not semantics_path.exists():
+        typer.echo(f"ERROR: semantics file not found: {semantics_path}", err=True)
+        raise typer.Exit(1)
+    if not primitives_path.exists():
+        typer.echo(f"ERROR: primitives file not found: {primitives_path}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        semantics_data = json.loads(semantics_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read semantics: {e}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        primitives_data = json.loads(primitives_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read primitives: {e}", err=True)
+        raise typer.Exit(1)
+
+    primitives_list = primitives_data.get("colors") if isinstance(primitives_data, dict) else None
+    if not isinstance(primitives_list, list):
+        typer.echo("ERROR: primitives file missing required 'colors' list.", err=True)
+        raise typer.Exit(1)
+
+    primitive_names = {e["final_name"] for e in primitives_list if isinstance(e.get("final_name"), str)}
+
+    creates: list[tuple[str, str]] = []
+    errors: list[str] = []
+
+    for name, primitive in sorted(semantics_data.items()):
+        if primitive in primitive_names:
+            creates.append((name, primitive))
+        else:
+            errors.append(f"{name}: primitive {primitive!r} not found in primitives.normalized.json")
+
+    typer.echo("\nSemantic sync dry-run:\n")
+    typer.echo("  create:")
+    if creates:
+        col = max(len(n) for n, _ in creates)
+        for name, primitive in creates:
+            typer.echo(f"    {name:<{col}}  → alias {primitive}")
+    else:
+        typer.echo("    (none)")
+
+    if errors:
+        typer.echo("\n  errors:")
+        for msg in errors:
+            typer.echo(f"    {msg}")
+        raise typer.Exit(1)

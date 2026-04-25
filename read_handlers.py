@@ -357,6 +357,27 @@ def read_color_usage_detail(
                    mount_timeout=mount_timeout, file_url=file_url, quiet=quiet)
 
 
+@read_app.command("color-usage-context")
+def read_color_usage_context(
+    out: str = typer.Option(
+        str(Path(__file__).parent / "tokens" / "color_usage_context.json"),
+        "--out",
+        help="Write enriched usage JSON to this path.",
+    ),
+    timeout: float = typer.Option(30.0, "--timeout"),
+    mount_timeout: float = typer.Option(30.0, "--mount-timeout"),
+    file_url: str | None = typer.Option(None, "-f", "--file"),
+    quiet: bool = typer.Option(False, "--quiet"),
+) -> None:
+    """Per-hex enriched context: fill/stroke/text_count, dominant_role, sample_nodes with parent/component names."""
+    script_path = _SCRIPT_DIR / "read_color_usage_context.js"
+    if not script_path.exists():
+        raise typer.BadParameter(f"Script not found: {script_path}")
+    user_js = script_path.read_text(encoding="utf-8")
+    _dispatch_read(user_js, out=out, timeout=timeout,
+                   mount_timeout=mount_timeout, file_url=file_url, quiet=quiet)
+
+
 @read_app.command("color-usage-summary")
 def read_color_usage_summary(
     out: str = typer.Option(..., "--out", help="Write usage JSON to this path (required — payload may be large)."),

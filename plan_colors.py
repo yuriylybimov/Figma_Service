@@ -768,11 +768,25 @@ def _audit_palette(colors: list[dict]) -> dict:
 # ── Semantic tokens ──────────────────────────────────────────────────────────
 
 SEMANTIC_ROLES = frozenset({
-    "text", "surface", "border", "background", "icon", "brand", "accent",
+    "text", "icon", "border", "surface", "canvas", "accent", "status", "button",
 })
+# "icon", "accent", and "status" are valid roles accepted by the validator and
+# available for explicit manual mappings, but _suggest_semantic_tokens does not
+# emit them automatically — they require deliberate colour choices beyond what
+# heuristics can reliably infer.
 SEMANTIC_STATES = frozenset({
-    "default", "hover", "focus", "disabled", "active",
+    "primary", "secondary", "inverse", "disabled",
+    "success", "warning", "error", "info", "danger",
 })
+
+
+def _hex_luminance(hex_: str) -> float:
+    """Return relative luminance (0–1) per WCAG 2.1, linearising sRGB channels."""
+    h = hex_.lstrip("#")
+    def _lin(c: float) -> float:
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (int(h[i*2:i*2+2], 16) / 255 for i in range(3))
+    return 0.2126 * _lin(r) + 0.7152 * _lin(g) + 0.0722 * _lin(b)
 
 _SEMANTIC_NAME_RE = re.compile(r"^color/([a-z]+)/([a-z]+)$")
 
@@ -865,3 +879,302 @@ def _build_and_validate_semantic_normalized(
             )
 
     return resolved
+
+
+# Semantic mapping invariants (frozen — do not change without updating contract test):
+#   text/primary    = darkest primitive by luminance
+#   text/disabled   = nearest lighter than text/primary (strictly higher luminance)
+#   canvas/primary  = lightest primitive by luminance
+#   surface/primary = second-lightest (omitted when only one gray exists)
+#   border/primary  = gray closest to L=0.50 by computed luminance (not by scale name)
+#   mapping is luminance-driven, not scale-name-based (gray/400 can beat gray/500)
+#   icon/* and accent/* are reserved roles — never auto-generated except accent/primary
+def _suggest_semantic_tokens(primitives_normalized: list[dict]) -> dict[str, str]:
+    """Return a suggested {semantic_name: primitive_name} mapping from a normalized primitive list.
+
+    Heuristics (luminance-based, pure):
+      - color/canvas/primary  → lightest gray (highest luminance)
+      - color/surface/primary → next distinct lightest gray (skipped if only one gray)
+      - color/text/primary    → darkest gray (lowest luminance)
+      - color/text/disabled   → one luminance step lighter than text/primary
+      - color/border/primary  → gray closest to L=0.50
+      - color/accent/primary  → most saturated non-gray primitive (if any)
+
+    Duplicate primitive values are allowed across different semantic roles.
+    Fixed colors (color/white, color/black) are excluded from gray heuristics.
+    Returns an empty dict if no qualifying primitives exist.
+    """
+    valid = [
+        e for e in primitives_normalized
+        if isinstance(e, dict)
+        and isinstance(e.get("final_name"), str)
+        and isinstance(e.get("hex"), str)
+    ]
+
+    grays = [e for e in valid if e["final_name"].startswith("color/gray/")]
+
+    result: dict[str, str] = {}
+
+    if grays:
+        by_lum = sorted(grays, key=lambda e: _hex_luminance(e["hex"]))
+
+        def _nearest(target_lum: float) -> str:
+            return min(grays, key=lambda e: abs(_hex_luminance(e["hex"]) - target_lum))["final_name"]
+
+        result["color/canvas/primary"] = by_lum[-1]["final_name"]
+
+        if len(by_lum) >= 2 and by_lum[-2]["final_name"] != by_lum[-1]["final_name"]:
+            result["color/surface/primary"] = by_lum[-2]["final_name"]
+
+        result["color/text/primary"] = by_lum[0]["final_name"]
+        # disabled: closest lighter gray than text/primary (strictly higher luminance), fallback to primary
+        primary_lum = _hex_luminance(by_lum[0]["hex"])
+        lighter = [e for e in by_lum[1:] if _hex_luminance(e["hex"]) > primary_lum]
+        result["color/text/disabled"] = (
+            min(lighter, key=lambda e: _hex_luminance(e["hex"]))["final_name"]
+            if lighter
+            else by_lum[0]["final_name"]
+        )
+        # Nearest to L=0.50 by computed luminance — numeric scale (400, 500…) is
+        # not a reliable proxy; the actual hex value determines the winner.
+        result["color/border/primary"] = _nearest(0.50)
+
+    # accent: most saturated non-gray, non-fixed primitive
+    non_gray = [
+        e for e in valid
+        if not e["final_name"].startswith("color/gray/")
+        and e["final_name"] not in ("color/white", "color/black")
+    ]
+    if non_gray:
+        def _saturation(e: dict) -> float:
+            _, _, sat = _hex_to_hls(e["hex"])
+            return sat
+        result["color/accent/primary"] = max(non_gray, key=_saturation)["final_name"]
+
+    return result
+
+
+_GENERIC_NODE_NAMES = frozenset({
+    "frame", "group", "container", "rectangle", "layer", "",
+})
+
+_AUTO_SUGGEST_ROLES = frozenset({"text", "surface", "border", "canvas"})
+
+
+def _is_generic_name(name: str) -> bool:
+    return name.strip().lower() in _GENERIC_NODE_NAMES
+
+
+def _multi_role_warning(entry: dict) -> str | None:
+    """Return a warning string if the color plays multiple roles above the 30% threshold."""
+    counts = {
+        "fill": entry.get("fill_count", 0),
+        "stroke": entry.get("stroke_count", 0),
+        "text_fill": entry.get("text_count", 0),
+    }
+    dominant_role, dominant_count = max(counts.items(), key=lambda kv: kv[1])
+    if dominant_count == 0:
+        return None
+    for role, count in counts.items():
+        if role != dominant_role and count >= dominant_count * 0.30:
+            return (
+                f"color plays multiple roles: dominant={dominant_role} ({dominant_count}), "
+                f"secondary={role} ({count})"
+            )
+    return None
+
+
+def _infer_role(entry: dict, luminance: float) -> str | None:
+    """Infer a single semantic role from multi-signal context. Returns None if ambiguous."""
+    fill = entry.get("fill_count", 0)
+    stroke = entry.get("stroke_count", 0)
+    text = entry.get("text_count", 0)
+    total = fill + stroke + text
+    if total == 0:
+        return None
+
+    dominant = entry.get("dominant_role", "fill")
+
+    if dominant == "text_fill" or (text > fill and text > stroke):
+        return "text"
+
+    if dominant == "stroke" or (stroke > fill and stroke > text):
+        # Only infer border when stroke-dominant usage comes from structural nodes
+        # (FRAME, RECTANGLE, INSTANCE). VECTOR-heavy stroke usage is icon/chart lines,
+        # not borders — skip rather than mis-label.
+        samples = entry.get("sample_nodes", [])
+        stroke_samples = [s for s in samples if s.get("role") == "stroke"]
+        vector_strokes = sum(1 for s in stroke_samples if s.get("type") == "VECTOR")
+        if stroke_samples and vector_strokes / len(stroke_samples) > 0.5:
+            return None
+        return "border"
+
+    # fill dominant — disambiguate canvas vs surface using context signals
+    samples = entry.get("sample_nodes", [])
+
+    def _is_global_surface() -> bool:
+        """Return True only when sample nodes span multiple distinct contexts.
+
+        A color used exclusively within one component (e.g. every sample is
+        "search bar" inside "container") is component-specific and must not
+        be promoted to a global surface token. Require at least 3 distinct
+        parent_frame_names OR at least 2 distinct component_names to pass.
+        The OR form means either broad layout spread or multi-component spread
+        is sufficient; the AND form is too strict for small sample sets.
+        3-frame threshold avoids false positives from typo-pair duplicates
+        (e.g. "container" / "conteiner" counted as two distinct values).
+        """
+        distinct_frames = {
+            s.get("parent_frame_name", "").strip()
+            for s in samples
+            if s.get("parent_frame_name", "").strip()
+        }
+        distinct_components = {
+            s.get("component_name", "").strip()
+            for s in samples
+            if s.get("component_name", "").strip()
+        }
+        return len(distinct_frames) >= 3 or len(distinct_components) >= 2
+
+    if luminance > 0.92:
+        for s in samples:
+            pfn = (s.get("parent_frame_name") or "").lower()
+            if "dashboard" in pfn or "page" in pfn:
+                return "canvas"
+        for s in samples:
+            cn = (s.get("component_name") or "").lower()
+            if "card" in cn or "modal" in cn:
+                return "surface" if _is_global_surface() else None
+        if luminance >= 0.97:
+            return "canvas"
+        return "surface" if _is_global_surface() else None
+
+    # Mid-luminance fill: surface — only for neutral/low-saturation colors.
+    # Saturated fills (icons, charts, accents) are skipped here; they belong
+    # to roles not auto-emitted by this function.
+    _, _, sat = _hex_to_hls(entry.get("hex", "#000000"))
+    if _perceived_chroma(sat, luminance) > 0.08:
+        return None
+
+    return "surface" if _is_global_surface() else None
+
+
+def _compute_confidence(entry: dict, role: str, has_multi_role_warning: bool) -> str:
+    """Return 'high', 'medium', or 'low' per architecture confidence rules."""
+    use_count = entry.get("use_count", 0)
+    samples = entry.get("sample_nodes", [])
+
+    if use_count < 10:
+        return "low"
+
+    if has_multi_role_warning:
+        return "low"
+
+    all_generic = all(_is_generic_name(s.get("name", "")) for s in samples)
+
+    pages = {s.get("page", "") for s in samples}
+    components = {s.get("component_name", "") for s in samples if s.get("component_name")}
+    single_page = len(pages) == 1
+    single_component = len(components) == 1 and len(samples) > 1
+
+    has_semantic_node = any(
+        not _is_generic_name(s.get("name", ""))
+        or (s.get("component_name") or "").strip() not in ("", *_GENERIC_NODE_NAMES)
+        for s in samples
+    )
+
+    if all_generic or (single_page and single_component):
+        return "medium"
+
+    if has_semantic_node and not single_page:
+        return "high"
+
+    return "medium"
+
+
+def _suggest_semantic_tokens_contextual(
+    context: list[dict],
+    primitives_normalized: list[dict],
+) -> list[dict]:
+    """Generate contextual semantic token suggestions from enriched color usage data.
+
+    Inputs:
+      context              — output of read color-usage-context (color_usage_context.json)
+      primitives_normalized — colors list from primitives.normalized.json
+
+    Returns a list of suggestion dicts, each with all six required fields:
+      semantic_name, primitive_name, confidence, reason, usage_examples, warnings
+
+    Rules (from architecture.md):
+      - Only roles in _AUTO_SUGGEST_ROLES are auto-generated (text, surface, border, canvas).
+      - icon and accent are never auto-generated here.
+      - Each suggestion's primitive_name must exist in primitives_normalized.
+      - At most one suggestion per (role, state) pair; first/highest-use wins.
+      - dominant_role alone is insufficient — multi-signal inference required.
+      - Confidence is downgraded per the five downgrade conditions in the spec.
+      - A warning is added when the second-strongest role count is ≥ 30% of dominant.
+    """
+    # Build hex → final_name lookup from primitives
+    prim_by_hex: dict[str, str] = {}
+    for e in primitives_normalized:
+        if isinstance(e, dict) and e.get("hex") and e.get("final_name"):
+            prim_by_hex[e["hex"].lower()] = e["final_name"]
+
+    # Track which (semantic_name) slots are already filled; first wins
+    taken: dict[str, dict] = {}
+
+    for entry in context:
+        hex_ = entry.get("hex", "").lower()
+        primitive_name = prim_by_hex.get(hex_)
+        if not primitive_name:
+            continue
+
+        luminance = _hex_luminance(hex_)
+        role = _infer_role(entry, luminance)
+        if role is None or role not in _AUTO_SUGGEST_ROLES:
+            continue
+
+        semantic_name = f"color/{role}/primary"
+        if semantic_name in taken:
+            continue
+
+        samples = entry.get("sample_nodes", [])
+        usage_examples = [
+            {
+                "name": s.get("name", ""),
+                "type": s.get("type", ""),
+                "role": s.get("role", ""),
+                "page": s.get("page", ""),
+                "parent_frame_name": s.get("parent_frame_name", ""),
+                "component_name": s.get("component_name", ""),
+            }
+            for s in samples[:5]
+        ]
+
+        warnings: list[str] = []
+        multi_warn = _multi_role_warning(entry)
+        if multi_warn:
+            warnings.append(multi_warn)
+
+        has_multi_role_warning = bool(multi_warn)
+        confidence = _compute_confidence(entry, role, has_multi_role_warning)
+
+        fill = entry.get("fill_count", 0)
+        stroke = entry.get("stroke_count", 0)
+        text = entry.get("text_count", 0)
+        reason = (
+            f"inferred role={role!r} from usage distribution "
+            f"(fill={fill}, stroke={stroke}, text={text}); "
+            f"luminance={round(luminance, 3)}; use_count={entry.get('use_count', 0)}"
+        )
+
+        taken[semantic_name] = {
+            "semantic_name": semantic_name,
+            "primitive_name": primitive_name,
+            "confidence": confidence,
+            "reason": reason,
+            "usage_examples": usage_examples,
+            "warnings": warnings,
+        }
+
+    return list(taken.values())
