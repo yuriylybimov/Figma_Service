@@ -1,7 +1,7 @@
 """Pure color-planning logic — no I/O, no CLI, no side effects."""
 
 import colorsys
-from datetime import datetime, timezone
+import re
 from pathlib import Path
 
 
@@ -235,8 +235,7 @@ def _fmt_merge_table(suggestions: list[dict]) -> list[str]:
         use_count = s.get("use_count", s.get("hsl_distance", "?"))
         # Extract use_count from reason string if not a direct field
         reason = s.get("reason", "")
-        import re as _re
-        m = _re.search(r"use_count=(\d+)", reason)
+        m = re.search(r"use_count=(\d+)", reason)
         uses = m.group(1) if m else "?"
         lines.append(
             f"  {s['source_hex']}  → {s['canonical_hex']}"
@@ -529,6 +528,7 @@ def _cleanup_candidates(
 
 def _build_primitive_color_plan(
     *,
+    generated_at: str,
     usage_path: Path,
     scanned_pages,
     scanned_nodes,
@@ -540,7 +540,7 @@ def _build_primitive_color_plan(
 ) -> dict:
     """Build the proposal dict written to primitives.proposed.json."""
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": generated_at,
         "source_usage_file": str(usage_path),
         "scanned_pages": scanned_pages,
         "scanned_nodes": scanned_nodes,

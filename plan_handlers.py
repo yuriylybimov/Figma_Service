@@ -173,6 +173,7 @@ def plan_primitive_colors_from_project(
         typer.echo(f"\nWARNING: overwriting existing proposal: {out_path}")
 
     proposal = _build_primitive_color_plan(
+        generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         usage_path=usage_path,
         scanned_pages=scanned_pages,
         scanned_nodes=scanned_nodes,
