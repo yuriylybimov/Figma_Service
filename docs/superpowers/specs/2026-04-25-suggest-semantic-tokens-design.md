@@ -71,7 +71,7 @@ Primitives are sorted lightest → darkest by luminance derived from hex. Rules 
 | 1 | Darkest primitive | `color/text/primary` | `darkest primitive` |
 | 2 | Second-darkest (if distinct from #1) | `color/text/secondary` | `dark scale entry` |
 | 3 | Slightly lighter than `text/primary` (next step up, not mid-scale) | `color/text/disabled` | `lighter than primary → disabled` |
-| 4 | Mid-scale primitive | `color/border/primary` | `mid-scale entry` |
+| 4 | Primitive at middle index of sorted list; on even-sized lists, pick the darker of the two centre candidates | `color/border/primary` | `mid-scale entry` |
 | 5 | Second-lightest (distinct from lightest) | `color/surface/primary` | `near-lightest entry` |
 | 6 | Lightest primitive | `color/canvas/primary` | `lightest primitive` |
 | 7 | Saturated primitive (S > 40%) | `color/accent/primary` | `saturated — accent candidate` |
@@ -84,7 +84,7 @@ Primitives are sorted lightest → darkest by luminance derived from hex. Rules 
 
 ### Disabled rule
 
-`text/disabled` is assigned to the primitive **one step lighter than `text/primary`** in the sorted list (i.e. the second-darkest), not the mid-scale value. Rationale: disabled text is a de-emphasized variant of body text, not a border-range value. On a 3-color palette this means `text/secondary` and `text/disabled` may land on the same primitive — both suggestions are emitted and the user decides.
+`text/disabled` is assigned to the primitive **one step lighter than `text/primary`** in the sorted list (i.e. the second-darkest), not the mid-scale value. Rationale: disabled text is a de-emphasized variant of body text, not a border-range value. On a 3-color palette this means `text/secondary` and `text/disabled` resolve to the same primitive. Both are emitted regardless — no deduplication, no ranking between them. The user decides which to keep.
 
 ### Icon role
 
