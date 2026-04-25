@@ -4,6 +4,7 @@ set -euo pipefail
 PYTHON=".venv/bin/python"
 RUN="$PYTHON run.py"
 TOKENS="tokens"
+DRY_RUN_ONLY=true
 
 usage() {
   echo "Usage: bash scripts/pipeline_primitive_colors.sh [-f FIGMA_URL]"
@@ -21,6 +22,14 @@ usage() {
   exit 0
 }
 
+if [[ -f ".env" ]]; then
+  while IFS='=' read -r key value; do
+    [[ "$key" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "$key" ]] && continue
+    export "$key=$value"
+  done < .env
+fi
+
 FILE_FLAG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -29,6 +38,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1"; usage ;;
   esac
 done
+
+[[ -x "$PYTHON" ]] || { echo "ERROR: $PYTHON not found or not executable. Run from project root after: python -m venv .venv && pip install -e ."; exit 1; }
+[[ -f "run.py"  ]] || { echo "ERROR: run.py not found. Must run from Figma_Service project root."; exit 1; }
+[[ -n "$FILE_FLAG" || -n "${FIGMA_FILE_URL:-}" ]] \
+  || { echo "ERROR: No Figma URL. Pass -f URL or set FIGMA_FILE_URL in .env"; exit 1; }
 
 mkdir -p "$TOKENS"
 [[ -f "$TOKENS/overrides.normalized.json" ]] || echo '{}' > "$TOKENS/overrides.normalized.json"
@@ -58,7 +72,22 @@ $RUN plan validate-normalized \
 
 echo ""
 echo "=== Step 5: sync dry-run ==="
+[[ "$DRY_RUN_ONLY" == "true" ]] || { echo "ERROR: DRY_RUN_ONLY safety check failed. Aborting."; exit 1; }
 $RUN sync primitive-colors-normalized $FILE_FLAG \
   --normalized "$TOKENS/primitives.normalized.json" \
   --dry-run \
   --verbose
+
+echo ""
+echo "══════════════════════════════════════════════"
+echo "  Pipeline complete (dry-run — no Figma writes)"
+echo "══════════════════════════════════════════════"
+echo "  Artifacts: $TOKENS/"
+echo "    color_usage_summary.json"
+echo "    primitives.proposed.json"
+echo "    primitives.normalized.json"
+echo ""
+echo "  To apply changes to Figma, run manually:"
+echo "    $RUN sync primitive-colors-normalized \\"
+echo "      --normalized $TOKENS/primitives.normalized.json"
+echo "══════════════════════════════════════════════"
