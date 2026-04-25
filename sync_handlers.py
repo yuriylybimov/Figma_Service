@@ -285,3 +285,111 @@ def sync_primitive_colors_normalized(
                     typer.echo(f"  = {short:<30}  (skipped)")
 
     raise typer.Exit(0)
+
+
+@sync_app.command("semantic-tokens")
+def sync_semantic_tokens(
+    semantics_file: str = typer.Option(
+        str(_TOKENS_DIR / "semantics.normalized.json"),
+        "--semantics",
+        help="Path to semantics.normalized.json.",
+    ),
+    primitives_file: str = typer.Option(
+        str(_TOKENS_DIR / "primitives.normalized.json"),
+        "--primitives",
+        help="Path to primitives.normalized.json (used to validate all references exist).",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview changes without writing to Figma."),
+    verbose: bool = typer.Option(False, "--verbose", help="Print per-entry log (human mode only)."),
+    json_output: bool = typer.Option(False, "--json", help="Emit only machine-readable JSON; suppresses all human output."),
+    debug: bool = typer.Option(False, "--debug", help="Show infrastructure logs (Playwright, bridge) on stderr."),
+    timeout: float = typer.Option(10.0, "--timeout"),
+    mount_timeout: float = typer.Option(30.0, "--mount-timeout"),
+    file_url: str | None = typer.Option(None, "-f", "--file"),
+    quiet: bool = typer.Option(False, "--quiet"),
+) -> None:
+    """Create or update semantic token variables in Figma as aliases to primitive variables."""
+    set_quiet(quiet)
+    set_debug(debug)
+
+    _run_validation(timeout=timeout, mount_timeout=mount_timeout,
+                    file_url=file_url, quiet=quiet)
+
+    semantics_path = Path(semantics_file)
+    if not semantics_path.exists():
+        raise typer.BadParameter(f"Semantics file not found: {semantics_path}")
+
+    primitives_path = Path(primitives_file)
+    if not primitives_path.exists():
+        raise typer.BadParameter(f"Primitives file not found: {primitives_path}")
+
+    semantics_data = json.loads(semantics_path.read_text(encoding="utf-8"))
+    if not isinstance(semantics_data, dict):
+        raise typer.BadParameter(f"Semantics file must be a flat JSON object: {semantics_path}")
+
+    primitives_data = json.loads(primitives_path.read_text(encoding="utf-8"))
+    primitive_names = {e["final_name"] for e in primitives_data.get("colors", []) if "final_name" in e}
+
+    missing = [prim for prim in semantics_data.values() if prim not in primitive_names]
+    if missing:
+        typer.echo(
+            f"ERROR: {len(missing)} primitive(s) referenced in semantics are not present in primitives.normalized.json:\n"
+            + "\n".join(f"  {m}" for m in sorted(missing)),
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    entries = [
+        {"semantic_name": sem, "primitive_name": prim}
+        for sem, prim in sorted(semantics_data.items())
+    ]
+
+    script_path = _SCRIPT_DIR / "sync_semantic_tokens.js"
+    if not script_path.exists():
+        raise typer.BadParameter(f"Script not found: {script_path}")
+
+    user_js = (script_path.read_text(encoding="utf-8")
+               .replace("__SEMANTICS__", json.dumps(entries))
+               .replace("__DRY_RUN__", "true" if dry_run else "false"))
+
+    result, ok_model = _dispatch_sync(user_js, timeout=timeout, mount_timeout=mount_timeout,
+                                       file_url=file_url, quiet=quiet)
+
+    if result.get("ok") is False or result.get("errored", 0) > 0:
+        missing_prims = result.get("missing_primitives", [])
+        if missing_prims:
+            typer.echo(
+                f"ERROR: Figma reports {len(missing_prims)} missing primitive(s):\n"
+                + "\n".join(f"  {m}" for m in missing_prims),
+                err=True,
+            )
+        else:
+            typer.echo(f"ERROR: sync_semantic_tokens.js returned ok:false (errored={result.get('errored', '?')})", err=True)
+        raise typer.Exit(1)
+
+    if json_output:
+        _emit_exit(ok_model, 0)
+
+    label = "Dry-run summary" if dry_run else "Sync summary"
+    typer.echo(f"\n{label}")
+    typer.echo(f"  +{result.get('created', '?')} created"
+               f"  ~{result.get('updated', '?')} updated"
+               f"  {result.get('skipped', '?')} skipped"
+               f"  ({result.get('total', len(entries))} total)")
+
+    log_entries = result.get("log", [])
+
+    if verbose and log_entries:
+        typer.echo("\nDetailed changes\n")
+        for e in sorted(log_entries, key=lambda e: e.get("semantic_name", "")):
+            action = e.get("action", "")
+            sem = e.get("semantic_name", "?")
+            prim = e.get("primitive_name", "")
+            if action in ("would-create-alias", "created"):
+                typer.echo(f"  + {sem:<40}  → {prim}")
+            elif action == "updated":
+                typer.echo(f"  ~ {sem:<40}  → {prim}")
+            elif action == "skipped":
+                typer.echo(f"  = {sem:<40}  (skipped)")
+
+    raise typer.Exit(0)

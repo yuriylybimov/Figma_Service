@@ -2039,8 +2039,8 @@ class TestSyncNormalizedOutput:
             "--normalized", str(f),
             "--dry-run",
         ])
-        assert "total=2" in result.output
-        assert "created=2" in result.output
+        assert "(2 total)" in result.output
+        assert "+2 created" in result.output
 
     def test_real_run_prints_sync_summary(self, tmp_path, monkeypatch):
         js_result = {**_JS_RESULT_DRY, "dry_run": False, "renamed": 1, "created": 1, "skipped": 0}
@@ -2053,7 +2053,7 @@ class TestSyncNormalizedOutput:
         ])
         assert result.exit_code == 0, result.output
         assert "Sync summary" in result.output
-        assert "renamed=1" in result.output
+        assert "~1 renamed" in result.output
 
     def test_verbose_shows_log_entries(self, tmp_path, monkeypatch):
         _patch_sync_with_result(monkeypatch, _JS_RESULT_DRY)
@@ -2065,8 +2065,8 @@ class TestSyncNormalizedOutput:
             "--dry-run", "--verbose",
         ])
         assert result.exit_code == 0, result.output
-        assert "Detailed log" in result.output
-        assert "color/red/500" in result.output
+        assert "Detailed changes" in result.output
+        assert "red/500" in result.output
 
     def test_no_verbose_hides_log_entries(self, tmp_path, monkeypatch):
         _patch_sync_with_result(monkeypatch, _JS_RESULT_DRY)
@@ -2077,7 +2077,7 @@ class TestSyncNormalizedOutput:
             "--normalized", str(f),
             "--dry-run",
         ])
-        assert "Detailed log" not in result.output
+        assert "Detailed changes" not in result.output
         assert "would-rename-or-create" not in result.output
 
     def test_summary_uses_js_result_counts(self, tmp_path, monkeypatch):
@@ -2090,7 +2090,64 @@ class TestSyncNormalizedOutput:
             "--normalized", str(f),
             "--dry-run",
         ])
-        assert "total=9" in result.output
-        assert "created=5" in result.output
-        assert "renamed=3" in result.output
-        assert "skipped=1" in result.output
+        assert "(9 total)" in result.output
+        assert "+5 created" in result.output
+        assert "~3 renamed" in result.output
+        assert "1 skipped" in result.output
+
+
+# ── plan semantic-sync-dry-run ────────────────────────────────────────────────
+
+def _write_semantic_fixtures(tmp_path, *, missing_primitive: bool = False):
+    primitives = tmp_path / "primitives.normalized.json"
+    primitives.write_text(json.dumps({
+        "colors": [
+            {"final_name": "color/gray/900", "hex": "#171717"},
+            {"final_name": "color/gray/100", "hex": "#f5f5f5"},
+        ]
+    }) + "\n", encoding="utf-8")
+
+    prim_ref = "color/gray/MISSING" if missing_primitive else "color/gray/900"
+    semantics = tmp_path / "semantics.normalized.json"
+    semantics.write_text(json.dumps({
+        "color/text/primary": prim_ref,
+        "color/canvas/primary": "color/gray/100",
+    }) + "\n", encoding="utf-8")
+
+    return semantics, primitives
+
+
+def test_semantic_sync_dry_run_outputs_aliases(tmp_path):
+    semantics, primitives = _write_semantic_fixtures(tmp_path)
+    result = runner.invoke(app, [
+        "plan", "semantic-sync-dry-run",
+        "--semantics", str(semantics),
+        "--primitives", str(primitives),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "color/text/primary" in result.output
+    assert "→ alias color/gray/900" in result.output
+
+
+def test_semantic_sync_dry_run_fails_on_missing_primitive(tmp_path):
+    semantics, primitives = _write_semantic_fixtures(tmp_path, missing_primitive=True)
+    result = runner.invoke(app, [
+        "plan", "semantic-sync-dry-run",
+        "--semantics", str(semantics),
+        "--primitives", str(primitives),
+    ])
+    assert result.exit_code != 0
+    assert "not found in primitives" in result.output
+
+
+def test_semantic_sync_dry_run_does_not_modify_files(tmp_path):
+    semantics, primitives = _write_semantic_fixtures(tmp_path)
+    sem_before = semantics.read_text(encoding="utf-8")
+    prim_before = primitives.read_text(encoding="utf-8")
+    runner.invoke(app, [
+        "plan", "semantic-sync-dry-run",
+        "--semantics", str(semantics),
+        "--primitives", str(primitives),
+    ])
+    assert semantics.read_text(encoding="utf-8") == sem_before
+    assert primitives.read_text(encoding="utf-8") == prim_before

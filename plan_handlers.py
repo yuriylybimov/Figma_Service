@@ -3,7 +3,6 @@
 All commands run entirely on the host. No Figma round-trips.
 """
 
-import colorsys
 import json
 import sys
 from datetime import datetime, timezone
@@ -11,425 +10,52 @@ from pathlib import Path
 
 import typer
 
+# Re-exported so tests can import pure helpers via `plan_handlers`; do not remove.
+from plan_colors import (  # noqa: F401
+    _STATUS_ORDER,
+    _HUE_GROUPS,
+    _GRAY_SATURATION_THRESHOLD,
+    _SCALES,
+    _FIXED_COLORS,
+    _build_lookup,
+    _hex_to_hls,
+    _perceived_chroma,
+    _color_group,
+    _hex_to_group,
+    _assign_scales,
+    _fmt_group_block,
+    _fmt_color_usage_summary_lines,
+    _fmt_top_color_lines,
+    _fmt_merge_summary_line,
+    _fmt_merge_table,
+    _build_normalized_entries,
+    _classify_colors,
+    _sort_colors,
+    _build_color_lookups,
+    _classify_and_count,
+    _apply_use_counts,
+    _hsl_delta,
+    _group_near_duplicates,
+    _deduplicate_primitives,
+    _cleanup_candidates,
+    _build_primitive_color_plan,
+    _HEX_RE,
+    _FORBIDDEN_MERGE_HEXES,
+    _validate_merge_map,
+    _apply_merge_map,
+    _validate_normalized,
+    _suggest_merge_overrides,
+    _ALL_SCALES,
+    _LOW_CHROMA_THRESHOLD,
+    _audit_palette,
+    _build_and_validate_semantic_normalized,
+    _suggest_semantic_tokens,
+    _suggest_semantic_tokens_contextual,
+)
+
 plan_app = typer.Typer(no_args_is_help=True, help="Host-side planning and proposal commands.")
 
 _TOKENS_DIR = Path(__file__).parent / "tokens"
-
-
-def _build_lookup(
-    items: list[dict],
-    *,
-    key: str,
-    value: str,
-    warn=None,
-) -> dict[str, str]:
-    """Build hex→name dict; first-seen wins; call warn(msg) on duplicates."""
-    result: dict[str, str] = {}
-    for item in items:
-        k = item[key]
-        v = item[value]
-        if k in result:
-            if warn:
-                warn(f"WARNING: duplicate hex {k!r} — keeping {result[k]!r}, ignoring {v!r}")
-        else:
-            result[k] = v
-    return result
-
-
-_STATUS_ORDER = {"matched": 0, "paint_style": 1, "new_candidate": 2}
-
-_HUE_GROUPS = [
-    (0.0,  0.05, "red"),
-    (0.05, 0.11, "orange"),
-    (0.11, 0.20, "yellow"),
-    (0.20, 0.46, "green"),
-    (0.46, 0.52, "cyan"),
-    (0.52, 0.69, "blue"),
-    (0.69, 0.79, "violet"),
-    (0.79, 0.86, "purple"),
-    (0.86, 0.95, "pink"),
-    (0.95, 1.01, "red"),   # wrap-around
-]
-_GRAY_SATURATION_THRESHOLD = 0.12
-_SCALES = [100, 200, 300, 400, 500, 600, 700, 800, 900]
-
-_FIXED_COLORS = {
-    "#ffffff": "color/white",
-    "#000000": "color/black",
-}
-
-
-def _hex_to_hls(hex_: str) -> tuple[float, float, float]:
-    h = hex_.lstrip("#")
-    r, g, b = int(h[0:2], 16) / 255, int(h[2:4], 16) / 255, int(h[4:6], 16) / 255
-    return colorsys.rgb_to_hls(r, g, b)  # (hue, lightness, saturation)
-
-
-def _perceived_chroma(saturation: float, lightness: float) -> float:
-    """Approximate perceptual chroma: HLS saturation × 2×L×(1-L) (the HLS 'C' factor).
-
-    Near-white and near-black colors have a very small chroma range, so even a
-    large HLS saturation value represents very little actual color.
-    """
-    return saturation * 2 * lightness * (1 - lightness)
-
-
-def _color_group(hue: float, saturation: float, lightness: float = 0.5) -> str:
-    if saturation < _GRAY_SATURATION_THRESHOLD:
-        return "gray"
-    # Very light near-neutral colors: HLS saturation is inflated at near-white
-    # lightness. Use perceptual chroma to avoid classifying #f9fafb as blue.
-    if _perceived_chroma(saturation, lightness) < 0.03:
-        return "gray"
-    for lo, hi, name in _HUE_GROUPS:
-        if lo <= hue < hi:
-            return name
-    return "gray"
-
-
-def _assign_scales(lightness_values: list[float]) -> list[int]:
-    """Map N lightness values (same-group, in input order) → 100-900 scale integers.
-
-    Lighter = lower scale number.  With fewer than 9 values, picks evenly-spaced
-    slots from the nine-point range.  Guarantees unique output: if two inputs have
-    identical lightness the tiebreaker is stable (index order) and a free slot is
-    found by scanning forward then backward.
-
-    Raises ValueError if n > 9 (only 9 scale slots exist).
-    """
-    n = len(lightness_values)
-    if n == 0:
-        return []
-    if n == 1:
-        return [500]
-    if n > 9:
-        raise ValueError(
-            f"Cannot assign unique scale slots: group has more than 9 colors ({n} provided)"
-        )
-
-    # Sort by lightness descending (darker → higher scale number).
-    # Tiebreak by original index (stable, deterministic).
-    order = sorted(range(n), key=lambda i: (-lightness_values[i], i))
-
-    # Assign evenly-spaced slot indices across [0, 8].
-    raw_slot_indices = [round(i * 8 / (n - 1)) for i in range(n)]
-
-    # Resolve slot collisions so every rank gets a distinct slot index.
-    # Scan forward first, then backward; the two directions are checked
-    # per delta so the nearest free slot wins.
-    used: set[int] = set()
-    resolved: list[int] = []
-    for si in raw_slot_indices:
-        if si not in used:
-            used.add(si)
-            resolved.append(si)
-        else:
-            found = None
-            for delta in range(1, 9):
-                if si + delta <= 8 and (si + delta) not in used:
-                    found = si + delta
-                    break
-                if si - delta >= 0 and (si - delta) not in used:
-                    found = si - delta
-                    break
-            # found is always set here: n ≤ 9 guarantees a free slot exists.
-            used.add(found)
-            resolved.append(found)
-
-    result = [0] * n
-    for rank, orig_idx in enumerate(order):
-        result[orig_idx] = _SCALES[resolved[rank]]
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Formatting helpers (terminal output only — no effect on JSON artifacts)
-# ---------------------------------------------------------------------------
-
-def _fmt_group_block(normalized: list[dict]) -> list[str]:
-    """Return human-readable grouped lines for a normalized color list.
-
-    Output format:
-        color / gray (9)
-          100  #f9fafb
-          ...
-        Fixed
-          white  #ffffff
-          black  #000000
-    """
-    fixed_order = {"color/white": "white", "color/black": "black"}
-    groups: dict[str, list[tuple[str, str]]] = {}  # group_name → [(scale_label, hex)]
-    fixed: list[tuple[str, str]] = []
-
-    for e in normalized:
-        fname = e["final_name"]
-        hex_ = e["hex"]
-        if fname in fixed_order:
-            fixed.append((fixed_order[fname], hex_))
-            continue
-        parts = fname.split("/")  # color / <group> / <scale>
-        group = parts[1] if len(parts) >= 2 else "?"
-        scale = parts[2] if len(parts) >= 3 else "?"
-        groups.setdefault(group, []).append((scale, hex_))
-
-    lines: list[str] = []
-    for group, members in sorted(groups.items(), key=lambda x: ("" if x[0] == "gray" else x[0])):
-        members_sorted = sorted(members, key=lambda x: (int(x[0]) if x[0].isdigit() else 9999))
-        lines.append(f"  color / {group} ({len(members_sorted)})")
-        for scale, hex_ in members_sorted:
-            marker = ""
-            # Mark overridden entries
-            entry = next((e for e in normalized if e["hex"] == hex_), None)
-            if entry and entry["final_name"] != entry["auto_name"]:
-                marker = " *"
-            lines.append(f"    {scale:<5}  {hex_}{marker}")
-
-    if fixed:
-        lines.append("  Fixed")
-        for label, hex_ in sorted(fixed):
-            lines.append(f"    {label:<7}  {hex_}")
-
-    return lines
-
-
-def _fmt_merge_summary_line(before: int, merged: int, after: int) -> str:
-    return f"  Merge  before={before}  merged={merged}  after={after}"
-
-
-def _fmt_merge_table(suggestions: list[dict]) -> list[str]:
-    """Compact fixed-width table for merge suggestions."""
-    if not suggestions:
-        return []
-    lines = ["  source     canonical   group   uses  reason"]
-    for s in suggestions:
-        use_count = s.get("use_count", s.get("hsl_distance", "?"))
-        # Extract use_count from reason string if not a direct field
-        reason = s.get("reason", "")
-        import re as _re
-        m = _re.search(r"use_count=(\d+)", reason)
-        uses = m.group(1) if m else "?"
-        lines.append(
-            f"  {s['source_hex']}  → {s['canonical_hex']}"
-            f"  {s['group']:<7}  {uses:<4}  {reason}"
-        )
-    return lines
-
-
-def _build_normalized_entries(
-    candidates: list[dict],
-    *,
-    overrides: dict[str, str],
-) -> list[dict]:
-    """Classify candidates into groups, assign scales, apply overrides.
-
-    Fixed colors (#ffffff, #000000) are resolved before HSL grouping and
-    are never assigned a scale slot.  Duplicate final_name values within
-    a group cannot occur because _assign_scales guarantees unique slots.
-    """
-    auto_names: dict[str, str] = {}
-
-    # Resolve fixed colors first; exclude them from group/scale logic.
-    non_fixed = []
-    for c in candidates:
-        fixed = _FIXED_COLORS.get(c["hex"])
-        if fixed is not None:
-            auto_names[c["hex"]] = fixed
-        else:
-            non_fixed.append(c)
-
-    groups: dict[str, list] = {}
-    for idx, c in enumerate(non_fixed):
-        hue, lightness, sat = _hex_to_hls(c["hex"])
-        group = _color_group(hue, sat, lightness)
-        groups.setdefault(group, []).append((idx, c, lightness))
-
-    for group_name, members in groups.items():
-        lightness_values = [m[2] for m in members]
-        scales = _assign_scales(lightness_values)
-        for (idx, c, _), scale in zip(members, scales):
-            auto_names[c["hex"]] = f"color/{group_name}/{scale}"
-
-    result = []
-    for c in candidates:
-        hex_ = c["hex"]
-        auto = auto_names[hex_]
-        final = overrides.get(hex_, auto)
-        candidate_name = f"color/candidate/{hex_.lstrip('#')}"
-        result.append({
-            "hex": hex_,
-            "candidate_name": candidate_name,
-            "auto_name": auto,
-            "final_name": final,
-            "fill_count": c["fill_count"],
-            "stroke_count": c["stroke_count"],
-            "examples": c.get("examples", []),
-        })
-    return result
-
-
-def _classify_colors(
-    node_colors: list[dict],
-    *,
-    prim_lookup: dict[str, str],
-    style_lookup: dict[str, str],
-    dup_prim_hexes: set[str] | None = None,
-    dup_style_hexes: set[str] | None = None,
-) -> list[dict]:
-    dup_prim_hexes = dup_prim_hexes or set()
-    dup_style_hexes = dup_style_hexes or set()
-    result = []
-    for color in node_colors:
-        hex_ = color["hex"]
-        if hex_ in prim_lookup:
-            status = "matched"
-            primitive_name = prim_lookup[hex_]
-            paint_style_name = None
-            dup = hex_ in dup_prim_hexes
-        elif hex_ in style_lookup:
-            status = "paint_style"
-            primitive_name = None
-            paint_style_name = style_lookup[hex_]
-            dup = hex_ in dup_style_hexes
-        else:
-            status = "new_candidate"
-            primitive_name = None
-            paint_style_name = None
-            dup = False
-        result.append({
-            "hex": hex_,
-            "fill_count": color["fill_count"],
-            "stroke_count": color["stroke_count"],
-            "status": status,
-            "primitive_name": primitive_name,
-            "paint_style_name": paint_style_name,
-            "duplicate_warning": dup,
-            "examples": color["examples"],
-        })
-    return result
-
-
-def _sort_colors(colors: list[dict]) -> list[dict]:
-    return sorted(
-        colors,
-        key=lambda c: (
-            _STATUS_ORDER[c["status"]],
-            -(c["fill_count"] + c["stroke_count"]),
-            c["hex"],
-        ),
-    )
-
-
-def _apply_use_counts(
-    colors: list[dict],
-    detail: list[dict],
-) -> list[dict]:
-    """Return copies of colors enriched with use_count from usage-detail data.
-
-    Colors absent from detail receive use_count=0. Input lists are not mutated.
-    """
-    detail_lookup: dict[str, int] = {entry["hex"]: entry["use_count"] for entry in detail}
-    return [{**c, "use_count": detail_lookup.get(c["hex"], 0)} for c in colors]
-
-
-def _hsl_delta(hex_a: str, hex_b: str) -> float:
-    """Perceptual HSL distance between two hex colors.
-
-    Hue is treated as circular (max distance = 0.5). Returns a value in [0, 1].
-    The three components are weighted: L×0.5, S×0.3, H×0.2 — lightness dominates
-    because near-duplicate grays differ mainly in lightness, not hue.
-    """
-    ha, la, sa = _hex_to_hls(hex_a)
-    hb, lb, sb = _hex_to_hls(hex_b)
-    hue_diff = min(abs(ha - hb), 1.0 - abs(ha - hb))
-    return (0.2 * hue_diff + 0.5 * abs(la - lb) + 0.3 * abs(sa - sb))
-
-
-def _group_near_duplicates(
-    colors: list[dict],
-    *,
-    threshold: float,
-) -> list[list[dict]]:
-    """Return groups of visually similar colors (HSL delta < threshold).
-
-    Uses single-linkage clustering: two colors end up in the same group if any
-    pair within the group is within threshold. Groups of 1 (singletons) are
-    included so callers always get a complete partition.
-    """
-    n = len(colors)
-    parent = list(range(n))
-
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(x: int, y: int) -> None:
-        parent[find(x)] = find(y)
-
-    for i in range(n):
-        for j in range(i + 1, n):
-            if _hsl_delta(colors[i]["hex"], colors[j]["hex"]) < threshold:
-                union(i, j)
-
-    buckets: dict[int, list[dict]] = {}
-    for i, c in enumerate(colors):
-        root = find(i)
-        buckets.setdefault(root, []).append(c)
-
-    return list(buckets.values())
-
-
-def _deduplicate_primitives(
-    colors: list[dict],
-    *,
-    threshold: float,
-) -> list[dict]:
-    """Group visually similar colors; recommend a canonical hex per group.
-
-    Returns one entry per group. Each entry contains:
-      - canonical_hex: the hex with the highest use_count (tie-broken by hex string)
-      - members: all hexes in the group with their use_count and cleanup_tag
-      - recommendation: 'keep' if singleton, 'merge' if multiple members
-      - hsl_delta_threshold: the threshold used
-
-    Input is not mutated. Never modifies Figma.
-    """
-    groups = _group_near_duplicates(colors, threshold=threshold)
-    result = []
-    for group in groups:
-        canonical = max(group, key=lambda c: (c["use_count"], c["hex"]))
-        recommendation = "keep" if len(group) == 1 else "merge"
-        result.append({
-            "canonical_hex": canonical["hex"],
-            "recommendation": recommendation,
-            "members": [
-                {
-                    "hex": c["hex"],
-                    "use_count": c["use_count"],
-                    "cleanup_tag": c.get("cleanup_tag"),
-                }
-                for c in sorted(group, key=lambda c: -c["use_count"])
-            ],
-        })
-    result.sort(key=lambda e: (-len(e["members"]), -e["members"][0]["use_count"]))
-    return result
-
-
-def _cleanup_candidates(
-    colors: list[dict],
-    *,
-    threshold: int,
-) -> list[dict]:
-    """Tag each color with cleanup_tag: 'keep' if use_count >= threshold, else 'review_low_use'.
-
-    Input list is not mutated.
-    """
-    result = []
-    for c in colors:
-        tag = "keep" if c["use_count"] >= threshold else "review_low_use"
-        result.append({**c, "cleanup_tag": tag})
-    return result
 
 
 @plan_app.command("cleanup-candidates")
@@ -523,85 +149,53 @@ def plan_primitive_colors_from_project(
         if key not in data:
             raise typer.BadParameter(f"Usage file missing required key: {key!r}")
 
-    warnings: list[str] = []
+    prim_seen, style_seen, dup_prim, dup_style, warnings = _build_color_lookups(
+        data["primitive_variables"],
+        data["paint_styles"],
+    )
+    for w in warnings:
+        typer.echo(w)
 
-    # Build lookups — track duplicate hexes for duplicate_warning flag
-    prim_seen: dict[str, str] = {}
-    dup_prim: set[str] = set()
-    for item in data["primitive_variables"]:
-        h = item["hex"]
-        if h in prim_seen:
-            msg = f"WARNING: duplicate hex {h!r} in primitive_variables — keeping {prim_seen[h]!r}, ignoring {item['name']!r}"
-            warnings.append(msg)
-            typer.echo(msg)
-            dup_prim.add(h)
-        else:
-            prim_seen[h] = item["name"]
-
-    style_seen: dict[str, str] = {}
-    dup_style: set[str] = set()
-    for item in data["paint_styles"]:
-        h = item["hex"]
-        if h in style_seen:
-            msg = f"WARNING: duplicate hex {h!r} in paint_styles — keeping {style_seen[h]!r}, ignoring {item['name']!r}"
-            warnings.append(msg)
-            typer.echo(msg)
-            dup_style.add(h)
-        else:
-            style_seen[h] = item["name"]
-
-    classified = _classify_colors(
+    sorted_colors, matched, paint_style_count, new_candidates, unique = _classify_and_count(
         data["node_colors"],
         prim_lookup=prim_seen,
         style_lookup=style_seen,
         dup_prim_hexes=dup_prim,
         dup_style_hexes=dup_style,
     )
-    sorted_colors = _sort_colors(classified)
-
-    matched = sum(1 for c in sorted_colors if c["status"] == "matched")
-    paint_style_count = sum(1 for c in sorted_colors if c["status"] == "paint_style")
-    new_candidates = sum(1 for c in sorted_colors if c["status"] == "new_candidate")
-    unique = len(sorted_colors)
 
     # Console summary
     scanned_nodes = data.get("scanned_nodes", "?")
     scanned_pages = data.get("scanned_pages", "?")
-    typer.echo(f"\nColor Usage Summary")
-    typer.echo(f"  Scanned: {scanned_nodes} nodes across {scanned_pages} pages")
-    typer.echo(f"  Unique colors: {unique}")
-    typer.echo(f"  Matched to primitives: {matched}")
-    typer.echo(f"  From paint styles: {paint_style_count}")
-    typer.echo(f"  New candidates: {new_candidates}")
+    for line in _fmt_color_usage_summary_lines(
+        scanned_nodes=scanned_nodes,
+        scanned_pages=scanned_pages,
+        unique=unique,
+        matched=matched,
+        paint_style_count=paint_style_count,
+        new_candidates=new_candidates,
+    ):
+        typer.echo(line)
     typer.echo(f"\nTop colors by usage:")
-    for c in sorted_colors[:10]:
-        total = c["fill_count"] + c["stroke_count"]
-        if c["status"] == "matched":
-            label = f"→ {c['primitive_name']} (matched)"
-        elif c["status"] == "paint_style":
-            label = f"→ {c['paint_style_name']} (paint_style)"
-        else:
-            label = "→ NEW CANDIDATE"
-        typer.echo(f"  {c['hex']}  ×{total:<5} {label}")
+    for line in _fmt_top_color_lines(sorted_colors):
+        typer.echo(line)
 
     # Write proposal
     out_path = Path(out).resolve()
     if out_path.exists():
         typer.echo(f"\nWARNING: overwriting existing proposal: {out_path}")
 
-    proposal = {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "source_usage_file": str(usage_path),
-        "scanned_pages": scanned_pages,
-        "scanned_nodes": scanned_nodes,
-        "summary": {
-            "unique_node_colors": unique,
-            "matched_to_primitives": matched,
-            "from_paint_styles": paint_style_count,
-            "new_candidates": new_candidates,
-        },
-        "colors": sorted_colors,
-    }
+    proposal = _build_primitive_color_plan(
+        generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        usage_path=usage_path,
+        scanned_pages=scanned_pages,
+        scanned_nodes=scanned_nodes,
+        unique=unique,
+        matched=matched,
+        paint_style_count=paint_style_count,
+        new_candidates=new_candidates,
+        sorted_colors=sorted_colors,
+    )
 
     out_path.write_text(
         json.dumps(proposal, ensure_ascii=False, indent=2) + "\n",
@@ -610,80 +204,7 @@ def plan_primitive_colors_from_project(
     typer.echo(f"\nProposal written to: {out_path}")
 
 
-_HEX_RE = __import__("re").compile(r"^#[0-9a-fA-F]{6}$")
-
 _MERGE_OVERRIDES_PATH = _TOKENS_DIR / "overrides.merge.json"
-_FORBIDDEN_MERGE_HEXES = frozenset({"#ffffff", "#000000"})
-
-
-def _validate_merge_map(
-    merge_map: dict[str, str],
-    candidate_hexes: set[str],
-) -> list[str]:
-    """Validate overrides.merge.json. Returns list of error strings; empty = valid."""
-    errors: list[str] = []
-    for src, canonical in merge_map.items():
-        if not _HEX_RE.match(src):
-            errors.append(f"source_hex {src!r}: not a valid #rrggbb hex")
-        if not _HEX_RE.match(canonical):
-            errors.append(f"canonical_hex {canonical!r} (source={src!r}): not a valid #rrggbb hex")
-        if src.lower() in _FORBIDDEN_MERGE_HEXES:
-            errors.append(f"source_hex {src!r}: #ffffff and #000000 cannot be merge values")
-        if canonical.lower() in _FORBIDDEN_MERGE_HEXES:
-            errors.append(f"canonical_hex {canonical!r}: #ffffff and #000000 cannot be merge values")
-        if _HEX_RE.match(src) and src not in candidate_hexes:
-            errors.append(f"source_hex {src!r}: not found in candidates")
-        if _HEX_RE.match(canonical) and canonical not in candidate_hexes:
-            errors.append(f"canonical_hex {canonical!r} (source={src!r}): not found in candidates")
-    return errors
-
-
-def _apply_merge_map(
-    candidates: list[dict],
-    merge_map: dict[str, str],
-) -> tuple[list[dict], int]:
-    """Remove source hexes from candidates (canonical hexes remain).
-
-    Returns (reduced_candidates, excluded_count).
-    """
-    source_hexes = set(merge_map.keys())
-    reduced = [c for c in candidates if c["hex"] not in source_hexes]
-    excluded = len(candidates) - len(reduced)
-    return reduced, excluded
-
-
-def _validate_normalized(colors: list[dict]) -> list[str]:
-    """Return a list of error strings; empty means valid."""
-    errors: list[str] = []
-    required = ("hex", "candidate_name", "auto_name", "final_name")
-    seen_final: dict[str, int] = {}
-
-    for i, entry in enumerate(colors):
-        ref = entry.get("hex") or f"entry[{i}]"
-
-        for field in required:
-            if field not in entry:
-                errors.append(f"{ref}: missing required field '{field}'")
-
-        hex_ = entry.get("hex", "")
-        if hex_ and not _HEX_RE.match(hex_):
-            errors.append(f"{ref}: 'hex' must be #rrggbb, got {hex_!r}")
-
-        final = entry.get("final_name", "")
-        if final:
-            if not final.startswith("color/"):
-                errors.append(f"{ref}: 'final_name' must start with 'color/', got {final!r}")
-            elif final.startswith("color/candidate/"):
-                errors.append(f"{ref}: 'final_name' must not start with 'color/candidate/', got {final!r}")
-
-            if final in seen_final:
-                errors.append(
-                    f"{ref}: duplicate 'final_name' {final!r} (also used by entry[{seen_final[final]}])"
-                )
-            else:
-                seen_final[final] = i
-
-    return errors
 
 
 @plan_app.command("validate-normalized")
@@ -912,82 +433,6 @@ def plan_deduplicate_primitives(
 _MERGE_PROPOSED_PATH = _TOKENS_DIR / "overrides.merge.proposed.json"
 
 
-def _suggest_merge_overrides(
-    colors: list[dict],
-    *,
-    dedup_covered: set[str] | None = None,
-) -> list[dict]:
-    """Suggest source_hex→canonical_hex merges for color groups with more than 9 members.
-
-    Returns a list of merge suggestion dicts:
-      {source_hex, canonical_hex, group, hsl_distance, reason}
-
-    Priority for picking which colors to merge out:
-      1. review_low_use before keep
-      2. lower use_count first
-      3. hex string tiebreak (stable, deterministic)
-
-    Canonical is the remaining group member nearest in HSL distance to the source;
-    ties broken by higher use_count then hex string.
-
-    #ffffff and #000000 are never source or canonical.
-    dedup_covered: set of source hexes already handled by a dedup merge group —
-    they are excluded from suggestion candidates (already covered upstream).
-    """
-    dedup_covered = dedup_covered or set()
-    # Exclude both fixed colors and dedup-covered sources from group membership.
-    # dedup_covered hexes are already handled upstream; treat them as absent.
-    excluded_from_groups = _FORBIDDEN_MERGE_HEXES | {h.lower() for h in dedup_covered}
-
-    # Build groups (same classification as _build_normalized_entries)
-    groups: dict[str, list[dict]] = {}
-    for c in colors:
-        hex_ = c["hex"]
-        if hex_.lower() in excluded_from_groups:
-            continue
-        hue, lightness, sat = _hex_to_hls(hex_)
-        group = _color_group(hue, sat, lightness)
-        groups.setdefault(group, []).append(c)
-
-    suggestions: list[dict] = []
-
-    for group_name, members in groups.items():
-        if len(members) <= 9:
-            continue
-
-        # Sort by merge priority: review_low_use first, then lower use_count, then hex
-        def _merge_priority(c: dict) -> tuple:
-            tag_order = 0 if c.get("cleanup_tag") == "review_low_use" else 1
-            return (tag_order, c["use_count"], c["hex"])
-
-        remaining = sorted(members, key=_merge_priority)
-        # How many to remove
-        n_to_remove = len(members) - 9
-
-        for _ in range(n_to_remove):
-            source = remaining[0]
-            remaining = remaining[1:]
-
-            # Pick canonical: nearest remaining member in HSL space
-            def _canonical_key(c: dict) -> tuple:
-                return (_hsl_delta(source["hex"], c["hex"]), -c["use_count"], c["hex"])
-
-            canonical = min(remaining, key=_canonical_key)
-            dist = _hsl_delta(source["hex"], canonical["hex"])
-
-            tag = source.get("cleanup_tag", "keep")
-            reason = f"{tag}, use_count={source['use_count']}, nearest in group"
-
-            suggestions.append({
-                "source_hex": source["hex"],
-                "canonical_hex": canonical["hex"],
-                "group": group_name,
-                "hsl_distance": round(dist, 6),
-                "reason": reason,
-            })
-
-    return suggestions
-
 
 @plan_app.command("suggest-merge-overrides")
 def plan_suggest_merge_overrides(
@@ -1050,8 +495,7 @@ def plan_suggest_merge_overrides(
     for c in colors:
         if c["hex"].lower() in _FORBIDDEN_MERGE_HEXES:
             continue
-        hue, lightness, sat = _hex_to_hls(c["hex"])
-        g = _color_group(hue, sat, lightness)
+        g = _hex_to_group(c["hex"])
         groups_seen[g] = groups_seen.get(g, 0) + 1
     overflowing = sum(1 for v in groups_seen.values() if v > 9)
 
@@ -1094,62 +538,6 @@ def plan_suggest_merge_overrides(
     )
     typer.echo(f"\nMerge suggestion written to: {out_path}")
 
-
-# ---------------------------------------------------------------------------
-# plan audit-palette
-# ---------------------------------------------------------------------------
-
-_ALL_SCALES = [100, 200, 300, 400, 500, 600, 700, 800, 900]
-_LOW_CHROMA_THRESHOLD = 0.04
-
-
-def _audit_palette(colors: list[dict]) -> dict:
-    """Read-only analysis of a normalized color list.
-
-    Returns:
-      total         — int
-      groups        — {group_name: [scale_int, ...]}  (sorted)
-      fixed         — [label, ...]
-      missing       — {group_name: [missing_scale_int, ...]}
-      suspicious    — [{"hex": ..., "group": ..., "chroma": ...}, ...]
-    """
-    fixed_names = {"color/white": "white", "color/black": "black"}
-    groups: dict[str, list[int]] = {}
-    fixed: list[str] = []
-    suspicious: list[dict] = []
-
-    for e in colors:
-        fname = e["final_name"]
-        hex_ = e["hex"]
-        if fname in fixed_names:
-            fixed.append(fixed_names[fname])
-            continue
-        parts = fname.split("/")
-        group = parts[1] if len(parts) >= 2 else "?"
-        scale_str = parts[2] if len(parts) >= 3 else "0"
-        scale = int(scale_str) if scale_str.isdigit() else 0
-        groups.setdefault(group, []).append(scale)
-
-        # Suspicious: non-gray color with low perceived chroma
-        if group != "gray":
-            hue, lightness, sat = _hex_to_hls(hex_)
-            chroma = _perceived_chroma(sat, lightness)
-            if chroma < _LOW_CHROMA_THRESHOLD:
-                suspicious.append({"hex": hex_, "group": group, "chroma": round(chroma, 4)})
-
-    missing: dict[str, list[int]] = {}
-    for group, scales in groups.items():
-        absent = [s for s in _ALL_SCALES if s not in scales]
-        if absent:
-            missing[group] = absent
-
-    return {
-        "total": len(colors),
-        "groups": {g: sorted(s) for g, s in sorted(groups.items())},
-        "fixed": sorted(fixed),
-        "missing": missing,
-        "suspicious": suspicious,
-    }
 
 
 @plan_app.command("audit-palette")
@@ -1198,3 +586,353 @@ def plan_audit_palette(
             typer.echo(f"  {s['hex']}  group={s['group']}  chroma={s['chroma']}")
     else:
         typer.echo("\nSuspicious (low-chroma, not gray): none")
+
+
+@plan_app.command("semantic-tokens-normalized")
+def plan_semantic_tokens_normalized(
+    seed: str = typer.Option(
+        str(_TOKENS_DIR / "semantics.seed.json"),
+        "--seed",
+        help="Path to hand-authored semantics seed JSON (semantic_name → primitive_name).",
+    ),
+    primitives: str = typer.Option(
+        str(_TOKENS_DIR / "primitives.normalized.json"),
+        "--primitives",
+        help="Path to primitives.normalized.json (must already exist and validate).",
+    ),
+    overrides: str = typer.Option(
+        str(_TOKENS_DIR / "overrides.semantic.normalized.json"),
+        "--overrides",
+        help="Path to semantic overrides JSON. Stubbed as {} if missing.",
+    ),
+    out: str = typer.Option(
+        str(_TOKENS_DIR / "semantics.normalized.json"),
+        "--out",
+        help="Output path for semantics.normalized.json.",
+    ),
+) -> None:
+    """Resolve semantic seed + overrides into a validated flat name→primitive map.
+
+    Validates inline; fails fast on first error and writes nothing on failure.
+    """
+    seed_path = Path(seed).resolve()
+    primitives_path = Path(primitives).resolve()
+    overrides_path = Path(overrides).resolve()
+    out_path = Path(out).resolve()
+
+    if not seed_path.exists():
+        typer.echo(
+            f"ERROR: seed file not found: {seed_path}\n"
+            f"Create it as a flat JSON object: {{\"color/<role>/<state>\": \"color/<group>/<scale>\"}}",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if not primitives_path.exists():
+        typer.echo(
+            f"ERROR: primitives file not found: {primitives_path}\n"
+            f"Run `plan primitive-colors-normalized` first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if not overrides_path.exists():
+        overrides_path.parent.mkdir(parents=True, exist_ok=True)
+        overrides_path.write_text("{}\n", encoding="utf-8")
+
+    try:
+        seed_data = json.loads(seed_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read seed: {e}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        primitives_data = json.loads(primitives_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read primitives: {e}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        overrides_data = json.loads(overrides_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read overrides: {e}", err=True)
+        raise typer.Exit(1)
+
+    primitives_list = primitives_data.get("colors") if isinstance(primitives_data, dict) else None
+    if not isinstance(primitives_list, list):
+        typer.echo(
+            f"ERROR: {primitives_path} missing required 'colors' list.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    try:
+        resolved = _build_and_validate_semantic_normalized(
+            seed_data, primitives_list, overrides_data
+        )
+    except ValueError as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(1)
+
+    sorted_resolved = {k: resolved[k] for k in sorted(resolved.keys())}
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(sorted_resolved, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    typer.echo(f"OK: {len(sorted_resolved)} semantic token(s) written to {out_path}")
+
+
+@plan_app.command("suggest-semantic-tokens")
+def plan_suggest_semantic_tokens(
+    primitives: str = typer.Option(
+        str(_TOKENS_DIR / "primitives.normalized.json"),
+        "--primitives",
+        help="Path to primitives.normalized.json (default: tokens/primitives.normalized.json).",
+    ),
+    out: str | None = typer.Option(
+        None,
+        "--out",
+        help=(
+            "Optional path to write suggestions as JSON. Prints to stdout when omitted. "
+            "Never writes semantics.seed.json. "
+            "[EXPERIMENTAL] Output is a starting point only — review before using."
+        ),
+    ),
+) -> None:
+    """[EXPERIMENTAL] Suggest semantic token assignments from a normalized primitive palette.
+
+    Uses luminance-based heuristics to propose initial mappings. Output is advisory only —
+    review and copy relevant entries into semantics.seed.json manually.
+    Never writes semantics.seed.json or semantics.normalized.json.
+    """
+    primitives_path = Path(primitives).resolve()
+    if not primitives_path.exists():
+        typer.echo(f"ERROR: primitives file not found: {primitives_path}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        primitives_data = json.loads(primitives_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read primitives: {e}", err=True)
+        raise typer.Exit(1)
+
+    primitives_list = primitives_data.get("colors") if isinstance(primitives_data, dict) else None
+    if not isinstance(primitives_list, list):
+        typer.echo("ERROR: primitives file missing required 'colors' list.", err=True)
+        raise typer.Exit(1)
+
+    suggestions = _suggest_semantic_tokens(primitives_list)
+
+    typer.echo(f"\nSemantic token suggestions ({len(suggestions)} token(s)):")
+    for name, primitive in sorted(suggestions.items()):
+        typer.echo(f"  {name:<36}  →  {primitive}")
+
+    if not suggestions:
+        typer.echo("  (none — no qualifying gray primitives found)")
+
+    if out is not None:
+        out_path = Path(out).resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if out_path.exists():
+            typer.echo(f"\nWARNING: overwriting existing file: {out_path}")
+        result = {
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "source_primitives_file": str(primitives_path),
+            "suggestions": suggestions,
+        }
+        out_path.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        typer.echo(f"\nSuggestions written to: {out_path}")
+
+
+@plan_app.command("suggest-semantic-tokens-contextual")
+def plan_suggest_semantic_tokens_contextual(
+    context: str = typer.Option(
+        str(_TOKENS_DIR / "color_usage_context.json"),
+        "--context",
+        help="Path to color_usage_context.json from `read color-usage-context`.",
+    ),
+    primitives: str = typer.Option(
+        str(_TOKENS_DIR / "primitives.normalized.json"),
+        "--primitives",
+        help="Path to primitives.normalized.json.",
+    ),
+    out: str = typer.Option(
+        str(_TOKENS_DIR / "semantics.contextual.json"),
+        "--out",
+        help=(
+            "Output path for experimental suggestions (default: tokens/semantics.contextual.json). "
+            "[EXPERIMENTAL] Never set to semantics.seed.json or semantics.normalized.json."
+        ),
+    ),
+) -> None:
+    """[EXPERIMENTAL] Generate contextual semantic token suggestions from enriched Figma usage data.
+
+    Uses multi-signal analysis (fill/stroke/text ratios, confidence scoring) to propose
+    mappings. Output is advisory only — review and copy relevant entries into
+    semantics.seed.json manually.
+    Reads color_usage_context.json and primitives.normalized.json.
+    Writes a proposal to tokens/semantics.contextual.json — never writes
+    semantics.seed.json or semantics.normalized.json.
+    """
+    context_path = Path(context).resolve()
+    if not context_path.exists():
+        typer.echo(
+            f"ERROR: context file not found: {context_path}\n"
+            f"Run `read color-usage-context --out tokens/color_usage_context.json` first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    primitives_path = Path(primitives).resolve()
+    if not primitives_path.exists():
+        typer.echo(
+            f"ERROR: primitives file not found: {primitives_path}\n"
+            f"Run `plan primitive-colors-normalized` first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    try:
+        context_data = json.loads(context_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read context file: {e}", err=True)
+        raise typer.Exit(1)
+
+    if not isinstance(context_data, list):
+        typer.echo("ERROR: context file must be a JSON array.", err=True)
+        raise typer.Exit(1)
+
+    try:
+        primitives_data = json.loads(primitives_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read primitives file: {e}", err=True)
+        raise typer.Exit(1)
+
+    primitives_list = primitives_data.get("colors") if isinstance(primitives_data, dict) else None
+    if not isinstance(primitives_list, list):
+        typer.echo("ERROR: primitives file missing required 'colors' list.", err=True)
+        raise typer.Exit(1)
+
+    suggestions = _suggest_semantic_tokens_contextual(context_data, primitives_list)
+
+    typer.echo(f"\nContextual semantic suggestions ({len(suggestions)} token(s)):\n")
+    if suggestions:
+        col_sem  = max(len(s["semantic_name"])  for s in suggestions)
+        col_prim = max(len(s["primitive_name"]) for s in suggestions)
+        typer.echo(
+            f"  {'semantic_name':<{col_sem}}  {'primitive_name':<{col_prim}}  confidence"
+        )
+        typer.echo(f"  {'-' * col_sem}  {'-' * col_prim}  ----------")
+        for s in suggestions:
+            warn_flag = "  [!]" if s["warnings"] else ""
+            typer.echo(
+                f"  {s['semantic_name']:<{col_sem}}  {s['primitive_name']:<{col_prim}}"
+                f"  {s['confidence']}{warn_flag}"
+            )
+    else:
+        typer.echo("  (none — no qualifying colors found in context)")
+
+    out_path = Path(out).resolve()
+
+    # Guard: experimental suggestion commands must never overwrite production seed files.
+    _PROTECTED_NAMES = {"semantics.seed.json", "semantics.normalized.json"}
+    if out_path.name in _PROTECTED_NAMES:
+        typer.echo(
+            f"ERROR: --out {out_path} targets a protected production file.\n"
+            "Experimental suggestions must not overwrite semantics.seed.json or "
+            "semantics.normalized.json. Use a different output path (e.g. semantics.contextual.json).",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if out_path.exists():
+        typer.echo(f"\nWARNING: overwriting existing file: {out_path}")
+
+    result = {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source_context_file": str(context_path),
+        "source_primitives_file": str(primitives_path),
+        "suggestions": suggestions,
+    }
+
+    out_path.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    typer.echo(f"\nContextual suggestions written to: {out_path}")
+
+
+@plan_app.command("semantic-sync-dry-run")
+def plan_semantic_sync_dry_run(
+    semantics: str = typer.Option(
+        str(_TOKENS_DIR / "semantics.normalized.json"),
+        "--semantics",
+        help="Path to semantics.normalized.json.",
+    ),
+    primitives: str = typer.Option(
+        str(_TOKENS_DIR / "primitives.normalized.json"),
+        "--primitives",
+        help="Path to primitives.normalized.json.",
+    ),
+) -> None:
+    """Simulate semantic variable sync without writing to Figma.
+
+    Reads semantics.normalized.json and primitives.normalized.json, verifies
+    every semantic alias resolves to a known primitive, and prints the planned
+    create operations. Exits non-zero if any primitive is missing.
+    """
+    semantics_path = Path(semantics).resolve()
+    primitives_path = Path(primitives).resolve()
+
+    if not semantics_path.exists():
+        typer.echo(f"ERROR: semantics file not found: {semantics_path}", err=True)
+        raise typer.Exit(1)
+    if not primitives_path.exists():
+        typer.echo(f"ERROR: primitives file not found: {primitives_path}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        semantics_data = json.loads(semantics_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read semantics: {e}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        primitives_data = json.loads(primitives_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read primitives: {e}", err=True)
+        raise typer.Exit(1)
+
+    primitives_list = primitives_data.get("colors") if isinstance(primitives_data, dict) else None
+    if not isinstance(primitives_list, list):
+        typer.echo("ERROR: primitives file missing required 'colors' list.", err=True)
+        raise typer.Exit(1)
+
+    primitive_names = {e["final_name"] for e in primitives_list if isinstance(e.get("final_name"), str)}
+
+    creates: list[tuple[str, str]] = []
+    errors: list[str] = []
+
+    for name, primitive in sorted(semantics_data.items()):
+        if primitive in primitive_names:
+            creates.append((name, primitive))
+        else:
+            errors.append(f"{name}: primitive {primitive!r} not found in primitives.normalized.json")
+
+    typer.echo("\nSemantic sync dry-run:\n")
+    typer.echo("  create:")
+    if creates:
+        col = max(len(n) for n, _ in creates)
+        for name, primitive in creates:
+            typer.echo(f"    {name:<{col}}  → alias {primitive}")
+    else:
+        typer.echo("    (none)")
+
+    if errors:
+        typer.echo("\n  errors:")
+        for msg in errors:
+            typer.echo(f"    {msg}")
+        raise typer.Exit(1)

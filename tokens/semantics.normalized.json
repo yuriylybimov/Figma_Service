@@ -1,0 +1,9 @@
+{
+  "color/accent/primary": "color/gray/900",
+  "color/border/primary": "color/gray/400",
+  "color/canvas/primary": "color/white",
+  "color/surface/primary": "color/white",
+  "color/surface/secondary": "color/gray/100",
+  "color/text/inverse": "color/white",
+  "color/text/primary": "color/gray/900"
+}
