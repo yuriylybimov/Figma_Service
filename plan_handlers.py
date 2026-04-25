@@ -48,6 +48,7 @@ from plan_colors import (  # noqa: F401
     _ALL_SCALES,
     _LOW_CHROMA_THRESHOLD,
     _audit_palette,
+    _build_and_validate_semantic_normalized,
 )
 
 plan_app = typer.Typer(no_args_is_help=True, help="Host-side planning and proposal commands.")
@@ -583,3 +584,97 @@ def plan_audit_palette(
             typer.echo(f"  {s['hex']}  group={s['group']}  chroma={s['chroma']}")
     else:
         typer.echo("\nSuspicious (low-chroma, not gray): none")
+
+
+@plan_app.command("semantic-tokens-normalized")
+def plan_semantic_tokens_normalized(
+    seed: str = typer.Option(
+        str(_TOKENS_DIR / "semantics.seed.json"),
+        "--seed",
+        help="Path to hand-authored semantics seed JSON (semantic_name → primitive_name).",
+    ),
+    primitives: str = typer.Option(
+        str(_TOKENS_DIR / "primitives.normalized.json"),
+        "--primitives",
+        help="Path to primitives.normalized.json (must already exist and validate).",
+    ),
+    overrides: str = typer.Option(
+        str(_TOKENS_DIR / "overrides.semantic.normalized.json"),
+        "--overrides",
+        help="Path to semantic overrides JSON. Stubbed as {} if missing.",
+    ),
+    out: str = typer.Option(
+        str(_TOKENS_DIR / "semantics.normalized.json"),
+        "--out",
+        help="Output path for semantics.normalized.json.",
+    ),
+) -> None:
+    """Resolve semantic seed + overrides into a validated flat name→primitive map.
+
+    Validates inline; fails fast on first error and writes nothing on failure.
+    """
+    seed_path = Path(seed).resolve()
+    primitives_path = Path(primitives).resolve()
+    overrides_path = Path(overrides).resolve()
+    out_path = Path(out).resolve()
+
+    if not seed_path.exists():
+        typer.echo(
+            f"ERROR: seed file not found: {seed_path}\n"
+            f"Create it as a flat JSON object: {{\"color/<role>/<state>\": \"color/<group>/<scale>\"}}",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if not primitives_path.exists():
+        typer.echo(
+            f"ERROR: primitives file not found: {primitives_path}\n"
+            f"Run `plan primitive-colors-normalized` first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if not overrides_path.exists():
+        overrides_path.parent.mkdir(parents=True, exist_ok=True)
+        overrides_path.write_text("{}\n", encoding="utf-8")
+
+    try:
+        seed_data = json.loads(seed_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read seed: {e}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        primitives_data = json.loads(primitives_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read primitives: {e}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        overrides_data = json.loads(overrides_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read overrides: {e}", err=True)
+        raise typer.Exit(1)
+
+    primitives_list = primitives_data.get("colors") if isinstance(primitives_data, dict) else None
+    if not isinstance(primitives_list, list):
+        typer.echo(
+            f"ERROR: {primitives_path} missing required 'colors' list.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    try:
+        resolved = _build_and_validate_semantic_normalized(
+            seed_data, primitives_list, overrides_data
+        )
+    except ValueError as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(1)
+
+    sorted_resolved = {k: resolved[k] for k in sorted(resolved.keys())}
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(sorted_resolved, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    typer.echo(f"OK: {len(sorted_resolved)} semantic token(s) written to {out_path}")

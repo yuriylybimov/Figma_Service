@@ -763,3 +763,105 @@ def _audit_palette(colors: list[dict]) -> dict:
         "missing": missing,
         "suspicious": suspicious,
     }
+
+
+# ── Semantic tokens ──────────────────────────────────────────────────────────
+
+SEMANTIC_ROLES = frozenset({
+    "text", "surface", "border", "background", "icon", "brand", "accent",
+})
+SEMANTIC_STATES = frozenset({
+    "default", "hover", "focus", "disabled", "active",
+})
+
+_SEMANTIC_NAME_RE = re.compile(r"^color/([a-z]+)/([a-z]+)$")
+
+
+def _validate_semantic_name(name: str) -> str | None:
+    """Return error string if invalid, else None."""
+    if not isinstance(name, str):
+        return f"semantic name must be a string, got {type(name).__name__}"
+    m = _SEMANTIC_NAME_RE.match(name)
+    if not m:
+        return f"semantic name {name!r}: must match 'color/<role>/<state>' (lowercase letters only)"
+    role, state = m.group(1), m.group(2)
+    if role not in SEMANTIC_ROLES:
+        return (
+            f"semantic name {name!r}: role {role!r} not in allowed roles "
+            f"{sorted(SEMANTIC_ROLES)}"
+        )
+    if state not in SEMANTIC_STATES:
+        return (
+            f"semantic name {name!r}: state {state!r} not in allowed states "
+            f"{sorted(SEMANTIC_STATES)}"
+        )
+    return None
+
+
+def _build_and_validate_semantic_normalized(
+    seed: dict,
+    primitives_normalized: list[dict],
+    overrides: dict,
+) -> dict[str, str]:
+    """Resolve overrides on top of seed and validate. Raise ValueError on first failure.
+
+    Returns flat {semantic_name: primitive_name} dict on success.
+    """
+    if not isinstance(seed, dict):
+        raise ValueError("seed must be a JSON object (semantic_name → primitive_name)")
+    if not isinstance(overrides, dict):
+        raise ValueError("overrides must be a JSON object (semantic_name → primitive_name)")
+    if not isinstance(primitives_normalized, list):
+        raise ValueError("primitives_normalized must be a JSON list of entries")
+
+    primitive_names: set[str] = set()
+    for entry in primitives_normalized:
+        if isinstance(entry, dict) and isinstance(entry.get("final_name"), str):
+            primitive_names.add(entry["final_name"])
+
+    resolved: dict[str, str] = {}
+    for k, v in seed.items():
+        resolved[k] = v
+    for k, v in overrides.items():
+        resolved[k] = v
+
+    semantic_names = set(resolved.keys())
+
+    for name in sorted(resolved.keys()):
+        value = resolved[name]
+
+        err = _validate_semantic_name(name)
+        if err:
+            raise ValueError(err)
+
+        if not isinstance(value, str):
+            raise ValueError(
+                f"semantic {name!r}: value must be a string primitive name, "
+                f"got {type(value).__name__}"
+            )
+        if _HEX_RE.match(value):
+            raise ValueError(
+                f"semantic {name!r}: value {value!r} is a raw hex; semantics must alias "
+                f"a primitive name (e.g. 'color/gray/900'), not a hex"
+            )
+        if not value.startswith("color/"):
+            raise ValueError(
+                f"semantic {name!r}: value {value!r} must start with 'color/'"
+            )
+        if value.startswith("color/candidate/"):
+            raise ValueError(
+                f"semantic {name!r}: value {value!r} is a candidate placeholder; "
+                f"semantics may not alias candidates"
+            )
+        if value in semantic_names:
+            raise ValueError(
+                f"semantic {name!r}: value {value!r} is itself a semantic name; "
+                f"semantics may only alias primitives"
+            )
+        if value not in primitive_names:
+            raise ValueError(
+                f"semantic {name!r}: primitive {value!r} not found in "
+                f"primitives.normalized.json"
+            )
+
+    return resolved

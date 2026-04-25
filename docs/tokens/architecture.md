@@ -225,6 +225,77 @@ Validation must run and pass before any sync command is allowed to proceed.
 
 ---
 
+## Semantic Tokens
+
+Semantic tokens are intent-named aliases pointing to primitives (e.g. `color/text/default → color/gray/900`). They live one layer above primitives and may **only** alias primitives — never raw hex, never other semantics.
+
+### Naming format
+
+```
+color/<role>/<state>
+```
+
+Strict enums (a name with any value outside these sets is invalid):
+
+| Field | Allowed values |
+|---|---|
+| `role` | `text`, `surface`, `border`, `background`, `icon`, `brand`, `accent` |
+| `state` | `default`, `hover`, `focus`, `disabled`, `active` |
+
+Examples: `color/text/default`, `color/surface/hover`, `color/border/disabled`.
+
+### Files
+
+| File | Role | Editable |
+|---|---|---|
+| `tokens/semantics.seed.json` | Hand-authored seed: flat `semantic_name → primitive_name` map | Yes (only semantic file you edit by hand) |
+| `tokens/overrides.semantic.normalized.json` | Hand-authored overrides: same flat shape, applied on top of the seed | Yes |
+| `tokens/semantics.normalized.json` | Pipeline output: identical flat shape, overrides resolved | **No** — re-run the command |
+
+All three files are flat JSON objects of the form:
+
+```json
+{
+  "color/text/default":    "color/gray/900",
+  "color/text/disabled":   "color/gray/400",
+  "color/surface/default": "color/white"
+}
+```
+
+Override precedence: an override entry replaces the seed entry for the same key. A missing override file is treated as an empty map.
+
+### Pipeline
+
+```
+tokens/semantics.seed.json
+tokens/overrides.semantic.normalized.json   ─┐
+tokens/primitives.normalized.json            │
+                                              ▼
+                       plan semantic-tokens-normalized
+                       (resolve overrides + validate inline; fail fast)
+                                              ↓
+                       tokens/semantics.normalized.json
+```
+
+Primitive normalize+validate must succeed before semantic normalize runs (semantics resolve aliases against the primitive output).
+
+### Validation rules (run inline by `plan semantic-tokens-normalized`)
+
+The command fails fast on the first violation, exits non-zero, and writes nothing.
+
+1. Each key matches `color/<role>/<state>` with role ∈ role enum and state ∈ state enum.
+2. Each value starts with `color/` and is **not** a `color/candidate/...` placeholder.
+3. Each value exists as a `final_name` in `tokens/primitives.normalized.json`.
+4. No value is a raw hex (e.g. `#1a2b3c`) — semantics may not store raw values.
+5. No value is itself a semantic name from the resolved map (no semantic-to-semantic aliasing).
+6. Names are unique (enforced by JSON object semantics; duplicate keys are a parse error).
+
+### Sync
+
+Semantic sync is **out of scope for this step**. Only primitive sync (`sync primitive-colors-normalized`) writes to Figma today. When semantic sync lands, it must follow the rules in [Sync Safety Rules](#sync-safety-rules) — VariableAlias values only, no raw hex, primitives synced first, dry-run support.
+
+---
+
 ## Token Files
 
 | File | Role | Written by |
@@ -235,6 +306,9 @@ Validation must run and pass before any sync command is allowed to proceed.
 | `tokens/primitives.dedup.json` | Near-duplicate grouping proposal | `plan deduplicate-primitives` |
 | `tokens/primitives.normalized.json` | Final names ready for sync | `plan primitive-colors-normalized` |
 | `tokens/overrides.normalized.json` | Human-managed hex → final_name map | `override set` |
+| `tokens/semantics.seed.json` | Hand-authored semantic_name → primitive_name map | Manual |
+| `tokens/overrides.semantic.normalized.json` | Hand-authored semantic_name → primitive_name override map | Manual |
+| `tokens/semantics.normalized.json` | Final semantic aliases ready for sync | `plan semantic-tokens-normalized` |
 
 All files are JSON, UTF-8, LF line endings, 2-space indent, trailing newline.
 Files tagged "proposal" are read-only inputs to the next stage. Never hand-edit them; re-run the command instead.
