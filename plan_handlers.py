@@ -10,6 +10,7 @@ from pathlib import Path
 
 import typer
 
+# Re-exported so tests can import pure helpers via `plan_handlers`; do not remove.
 from plan_colors import (  # noqa: F401
     _STATUS_ORDER,
     _HUE_GROUPS,
