@@ -5,6 +5,9 @@ PYTHON=".venv/bin/python"
 RUN="$PYTHON run.py"
 TOKENS="tokens"
 DRY_RUN_ONLY=true
+FRESH=false
+
+step() { echo ""; echo "── Step $1: $2 [$(date +%H:%M:%S)] ──"; }
 
 usage() {
   echo "Usage: bash scripts/pipeline_primitive_colors.sh [-f FIGMA_URL]"
@@ -18,6 +21,7 @@ usage() {
   echo ""
   echo "Options:"
   echo "  -f FIGMA_URL   Figma file URL (overrides FIGMA_FILE_URL env var)"
+  echo "  --fresh        Write outputs to tokens/<timestamp>/ instead of tokens/"
   echo "  -h, --help     Show this help message"
   exit 0
 }
@@ -34,6 +38,7 @@ FILE_FLAG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -f) FILE_FLAG="-f $2"; shift 2 ;;
+    --fresh) FRESH=true; shift ;;
     -h|--help) usage ;;
     *) echo "Unknown option: $1"; usage ;;
   esac
@@ -44,34 +49,41 @@ done
 [[ -n "$FILE_FLAG" || -n "${FIGMA_FILE_URL:-}" ]] \
   || { echo "ERROR: No Figma URL. Pass -f URL or set FIGMA_FILE_URL in .env"; exit 1; }
 
-mkdir -p "$TOKENS"
-[[ -f "$TOKENS/overrides.normalized.json" ]] || echo '{}' > "$TOKENS/overrides.normalized.json"
-[[ -f "$TOKENS/overrides.merge.json"      ]] || echo '{}' > "$TOKENS/overrides.merge.json"
+if [[ "$FRESH" == "true" ]]; then
+  TOKENS="tokens/$(date +%Y%m%d_%H%M%S)"
+  mkdir -p "$TOKENS"
+  [[ -f "tokens/overrides.normalized.json" ]] \
+    && cp "tokens/overrides.normalized.json" "$TOKENS/overrides.normalized.json" \
+    || echo '{}' > "$TOKENS/overrides.normalized.json"
+  [[ -f "tokens/overrides.merge.json" ]] \
+    && cp "tokens/overrides.merge.json" "$TOKENS/overrides.merge.json" \
+    || echo '{}' > "$TOKENS/overrides.merge.json"
+else
+  mkdir -p "$TOKENS"
+  [[ -f "$TOKENS/overrides.normalized.json" ]] || echo '{}' > "$TOKENS/overrides.normalized.json"
+  [[ -f "$TOKENS/overrides.merge.json"      ]] || echo '{}' > "$TOKENS/overrides.merge.json"
+fi
 
-echo "=== Step 1: read color-usage-summary ==="
+step 1 "read color-usage-summary"
 $RUN read color-usage-summary $FILE_FLAG --out "$TOKENS/color_usage_summary.json"
 
-echo ""
-echo "=== Step 2: plan primitive-colors-from-project ==="
+step 2 "plan primitive-colors-from-project"
 $RUN plan primitive-colors-from-project \
   --usage "$TOKENS/color_usage_summary.json" \
   --out   "$TOKENS/primitives.proposed.json"
 
-echo ""
-echo "=== Step 3: plan primitive-colors-normalized ==="
+step 3 "plan primitive-colors-normalized"
 $RUN plan primitive-colors-normalized \
   --proposed  "$TOKENS/primitives.proposed.json" \
   --overrides "$TOKENS/overrides.normalized.json" \
   --merge     "$TOKENS/overrides.merge.json" \
   --out       "$TOKENS/primitives.normalized.json"
 
-echo ""
-echo "=== Step 4: plan validate-normalized ==="
+step 4 "plan validate-normalized"
 $RUN plan validate-normalized \
   --normalized "$TOKENS/primitives.normalized.json"
 
-echo ""
-echo "=== Step 5: sync dry-run ==="
+step 5 "sync dry-run"
 [[ "$DRY_RUN_ONLY" == "true" ]] || { echo "ERROR: DRY_RUN_ONLY safety check failed. Aborting."; exit 1; }
 $RUN sync primitive-colors-normalized $FILE_FLAG \
   --normalized "$TOKENS/primitives.normalized.json" \
