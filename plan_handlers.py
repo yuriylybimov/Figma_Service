@@ -38,6 +38,15 @@ from plan_colors import (  # noqa: F401
     _deduplicate_primitives,
     _cleanup_candidates,
     _build_primitive_color_plan,
+    _HEX_RE,
+    _FORBIDDEN_MERGE_HEXES,
+    _validate_merge_map,
+    _apply_merge_map,
+    _validate_normalized,
+    _suggest_merge_overrides,
+    _ALL_SCALES,
+    _LOW_CHROMA_THRESHOLD,
+    _audit_palette,
 )
 
 plan_app = typer.Typer(no_args_is_help=True, help="Host-side planning and proposal commands.")
@@ -191,80 +200,7 @@ def plan_primitive_colors_from_project(
     typer.echo(f"\nProposal written to: {out_path}")
 
 
-_HEX_RE = __import__("re").compile(r"^#[0-9a-fA-F]{6}$")
-
 _MERGE_OVERRIDES_PATH = _TOKENS_DIR / "overrides.merge.json"
-_FORBIDDEN_MERGE_HEXES = frozenset({"#ffffff", "#000000"})
-
-
-def _validate_merge_map(
-    merge_map: dict[str, str],
-    candidate_hexes: set[str],
-) -> list[str]:
-    """Validate overrides.merge.json. Returns list of error strings; empty = valid."""
-    errors: list[str] = []
-    for src, canonical in merge_map.items():
-        if not _HEX_RE.match(src):
-            errors.append(f"source_hex {src!r}: not a valid #rrggbb hex")
-        if not _HEX_RE.match(canonical):
-            errors.append(f"canonical_hex {canonical!r} (source={src!r}): not a valid #rrggbb hex")
-        if src.lower() in _FORBIDDEN_MERGE_HEXES:
-            errors.append(f"source_hex {src!r}: #ffffff and #000000 cannot be merge values")
-        if canonical.lower() in _FORBIDDEN_MERGE_HEXES:
-            errors.append(f"canonical_hex {canonical!r}: #ffffff and #000000 cannot be merge values")
-        if _HEX_RE.match(src) and src not in candidate_hexes:
-            errors.append(f"source_hex {src!r}: not found in candidates")
-        if _HEX_RE.match(canonical) and canonical not in candidate_hexes:
-            errors.append(f"canonical_hex {canonical!r} (source={src!r}): not found in candidates")
-    return errors
-
-
-def _apply_merge_map(
-    candidates: list[dict],
-    merge_map: dict[str, str],
-) -> tuple[list[dict], int]:
-    """Remove source hexes from candidates (canonical hexes remain).
-
-    Returns (reduced_candidates, excluded_count).
-    """
-    source_hexes = set(merge_map.keys())
-    reduced = [c for c in candidates if c["hex"] not in source_hexes]
-    excluded = len(candidates) - len(reduced)
-    return reduced, excluded
-
-
-def _validate_normalized(colors: list[dict]) -> list[str]:
-    """Return a list of error strings; empty means valid."""
-    errors: list[str] = []
-    required = ("hex", "candidate_name", "auto_name", "final_name")
-    seen_final: dict[str, int] = {}
-
-    for i, entry in enumerate(colors):
-        ref = entry.get("hex") or f"entry[{i}]"
-
-        for field in required:
-            if field not in entry:
-                errors.append(f"{ref}: missing required field '{field}'")
-
-        hex_ = entry.get("hex", "")
-        if hex_ and not _HEX_RE.match(hex_):
-            errors.append(f"{ref}: 'hex' must be #rrggbb, got {hex_!r}")
-
-        final = entry.get("final_name", "")
-        if final:
-            if not final.startswith("color/"):
-                errors.append(f"{ref}: 'final_name' must start with 'color/', got {final!r}")
-            elif final.startswith("color/candidate/"):
-                errors.append(f"{ref}: 'final_name' must not start with 'color/candidate/', got {final!r}")
-
-            if final in seen_final:
-                errors.append(
-                    f"{ref}: duplicate 'final_name' {final!r} (also used by entry[{seen_final[final]}])"
-                )
-            else:
-                seen_final[final] = i
-
-    return errors
 
 
 @plan_app.command("validate-normalized")
@@ -493,81 +429,6 @@ def plan_deduplicate_primitives(
 _MERGE_PROPOSED_PATH = _TOKENS_DIR / "overrides.merge.proposed.json"
 
 
-def _suggest_merge_overrides(
-    colors: list[dict],
-    *,
-    dedup_covered: set[str] | None = None,
-) -> list[dict]:
-    """Suggest source_hex→canonical_hex merges for color groups with more than 9 members.
-
-    Returns a list of merge suggestion dicts:
-      {source_hex, canonical_hex, group, hsl_distance, reason}
-
-    Priority for picking which colors to merge out:
-      1. review_low_use before keep
-      2. lower use_count first
-      3. hex string tiebreak (stable, deterministic)
-
-    Canonical is the remaining group member nearest in HSL distance to the source;
-    ties broken by higher use_count then hex string.
-
-    #ffffff and #000000 are never source or canonical.
-    dedup_covered: set of source hexes already handled by a dedup merge group —
-    they are excluded from suggestion candidates (already covered upstream).
-    """
-    dedup_covered = dedup_covered or set()
-    # Exclude both fixed colors and dedup-covered sources from group membership.
-    # dedup_covered hexes are already handled upstream; treat them as absent.
-    excluded_from_groups = _FORBIDDEN_MERGE_HEXES | {h.lower() for h in dedup_covered}
-
-    # Build groups (same classification as _build_normalized_entries)
-    groups: dict[str, list[dict]] = {}
-    for c in colors:
-        hex_ = c["hex"]
-        if hex_.lower() in excluded_from_groups:
-            continue
-        group = _hex_to_group(hex_)
-        groups.setdefault(group, []).append(c)
-
-    suggestions: list[dict] = []
-
-    for group_name, members in groups.items():
-        if len(members) <= 9:
-            continue
-
-        # Sort by merge priority: review_low_use first, then lower use_count, then hex
-        def _merge_priority(c: dict) -> tuple:
-            tag_order = 0 if c.get("cleanup_tag") == "review_low_use" else 1
-            return (tag_order, c["use_count"], c["hex"])
-
-        remaining = sorted(members, key=_merge_priority)
-        # How many to remove
-        n_to_remove = len(members) - 9
-
-        for _ in range(n_to_remove):
-            source = remaining[0]
-            remaining = remaining[1:]
-
-            # Pick canonical: nearest remaining member in HSL space
-            def _canonical_key(c: dict) -> tuple:
-                return (_hsl_delta(source["hex"], c["hex"]), -c["use_count"], c["hex"])
-
-            canonical = min(remaining, key=_canonical_key)
-            dist = _hsl_delta(source["hex"], canonical["hex"])
-
-            tag = source.get("cleanup_tag", "keep")
-            reason = f"{tag}, use_count={source['use_count']}, nearest in group"
-
-            suggestions.append({
-                "source_hex": source["hex"],
-                "canonical_hex": canonical["hex"],
-                "group": group_name,
-                "hsl_distance": round(dist, 6),
-                "reason": reason,
-            })
-
-    return suggestions
-
 
 @plan_app.command("suggest-merge-overrides")
 def plan_suggest_merge_overrides(
@@ -673,62 +534,6 @@ def plan_suggest_merge_overrides(
     )
     typer.echo(f"\nMerge suggestion written to: {out_path}")
 
-
-# ---------------------------------------------------------------------------
-# plan audit-palette
-# ---------------------------------------------------------------------------
-
-_ALL_SCALES = [100, 200, 300, 400, 500, 600, 700, 800, 900]
-_LOW_CHROMA_THRESHOLD = 0.04
-
-
-def _audit_palette(colors: list[dict]) -> dict:
-    """Read-only analysis of a normalized color list.
-
-    Returns:
-      total         — int
-      groups        — {group_name: [scale_int, ...]}  (sorted)
-      fixed         — [label, ...]
-      missing       — {group_name: [missing_scale_int, ...]}
-      suspicious    — [{"hex": ..., "group": ..., "chroma": ...}, ...]
-    """
-    fixed_names = {"color/white": "white", "color/black": "black"}
-    groups: dict[str, list[int]] = {}
-    fixed: list[str] = []
-    suspicious: list[dict] = []
-
-    for e in colors:
-        fname = e["final_name"]
-        hex_ = e["hex"]
-        if fname in fixed_names:
-            fixed.append(fixed_names[fname])
-            continue
-        parts = fname.split("/")
-        group = parts[1] if len(parts) >= 2 else "?"
-        scale_str = parts[2] if len(parts) >= 3 else "0"
-        scale = int(scale_str) if scale_str.isdigit() else 0
-        groups.setdefault(group, []).append(scale)
-
-        # Suspicious: non-gray color with low perceived chroma
-        if group != "gray":
-            hue, lightness, sat = _hex_to_hls(hex_)
-            chroma = _perceived_chroma(sat, lightness)
-            if chroma < _LOW_CHROMA_THRESHOLD:
-                suspicious.append({"hex": hex_, "group": group, "chroma": round(chroma, 4)})
-
-    missing: dict[str, list[int]] = {}
-    for group, scales in groups.items():
-        absent = [s for s in _ALL_SCALES if s not in scales]
-        if absent:
-            missing[group] = absent
-
-    return {
-        "total": len(colors),
-        "groups": {g: sorted(s) for g, s in sorted(groups.items())},
-        "fixed": sorted(fixed),
-        "missing": missing,
-        "suspicious": suspicious,
-    }
 
 
 @plan_app.command("audit-palette")
