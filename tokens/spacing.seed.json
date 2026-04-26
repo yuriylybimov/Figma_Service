@@ -1,0 +1,13 @@
+[
+  { "name": "spacing/space-4",  "value": 4  },
+  { "name": "spacing/space-8",  "value": 8  },
+  { "name": "spacing/space-12", "value": 12 },
+  { "name": "spacing/space-16", "value": 16 },
+  { "name": "spacing/space-20", "value": 20 },
+  { "name": "spacing/space-24", "value": 24 },
+  { "name": "spacing/space-32", "value": 32 },
+  { "name": "spacing/space-40", "value": 40 },
+  { "name": "spacing/space-48", "value": 48 },
+  { "name": "spacing/space-60", "value": 60 },
+  { "name": "spacing/space-64", "value": 64 }
+]

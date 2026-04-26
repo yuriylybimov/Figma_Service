@@ -394,6 +394,24 @@ def read_color_usage_summary(
     _dispatch_read(user_js, out=out, timeout=timeout,
                    mount_timeout=mount_timeout, file_url=file_url, quiet=quiet)
 
+
+@read_app.command("primitive-usage")
+def read_primitive_usage(
+    out: str = typer.Option(..., "--out", help="Write raw primitive usage JSON to this path (required — payload may be large)."),
+    timeout: float = typer.Option(30.0, "--timeout"),
+    mount_timeout: float = typer.Option(30.0, "--mount-timeout"),
+    file_url: str | None = typer.Option(None, "-f", "--file"),
+    quiet: bool = typer.Option(False, "--quiet"),
+) -> None:
+    """Scan Figma file for non-color primitive values (spacing, radius, font-*, etc.); write raw usage JSON to --out."""
+    script_path = _SCRIPT_DIR / "read_primitive_usage.js"
+    if not script_path.exists():
+        raise typer.BadParameter(f"Script not found: {script_path}")
+    user_js = script_path.read_text(encoding="utf-8")
+    _dispatch_read(user_js, out=out, timeout=timeout,
+                   mount_timeout=mount_timeout, file_url=file_url, quiet=quiet)
+
+
 # Shared pagination slice injected into both local-styles-summary and
 # components-summary. Source array must be bound to `_all` before this runs.
 _JS_PAGINATE_SLICE = """
@@ -486,6 +504,56 @@ return {
 };
 """
 )
+
+
+@read_app.command("typography-audit")
+def read_typography_audit(
+    out: str = typer.Option(..., "--out", help="Write typography audit JSON to this path (required — payload may be large)."),
+    timeout: float = typer.Option(30.0, "--timeout"),
+    mount_timeout: float = typer.Option(30.0, "--mount-timeout"),
+    file_url: str | None = typer.Option(None, "-f", "--file"),
+    quiet: bool = typer.Option(False, "--quiet"),
+) -> None:
+    """Read-only typography audit: local text styles + text node usage across all pages."""
+    script_path = _SCRIPT_DIR / "read_typography_audit.js"
+    if not script_path.exists():
+        raise typer.BadParameter(f"Script not found: {script_path}")
+    user_js = script_path.read_text(encoding="utf-8")
+    _dispatch_read(user_js, out=out, timeout=timeout,
+                   mount_timeout=mount_timeout, file_url=file_url, quiet=quiet)
+
+
+def _group_typography_combinations(text_nodes: list[dict]) -> list[dict]:
+    """Group a list of text node dicts by unique typography combination.
+
+    Each dict must contain: fontFamily, fontStyle, fontSize, fontWeight,
+    lineHeight, letterSpacing.  Returns a list of unique combination dicts
+    with an added ``usageCount`` field, sorted by usageCount descending.
+    This mirrors the grouping logic in the JS script so it can be tested
+    host-side without a Figma round-trip.
+    """
+    groups: dict[str, dict] = {}
+    for node in text_nodes:
+        key = "|".join([
+            node.get("fontFamily") or "",
+            node.get("fontStyle") or "",
+            str(node.get("fontSize")) if node.get("fontSize") is not None else "",
+            str(node.get("fontWeight")) if node.get("fontWeight") is not None else "",
+            str(node.get("lineHeight")) if node.get("lineHeight") is not None else "",
+            str(node.get("letterSpacing")) if node.get("letterSpacing") is not None else "",
+        ])
+        if key not in groups:
+            groups[key] = {
+                "fontFamily": node.get("fontFamily"),
+                "fontStyle": node.get("fontStyle"),
+                "fontSize": node.get("fontSize"),
+                "fontWeight": node.get("fontWeight"),
+                "lineHeight": node.get("lineHeight"),
+                "letterSpacing": node.get("letterSpacing"),
+                "usageCount": 0,
+            }
+        groups[key]["usageCount"] += 1
+    return sorted(groups.values(), key=lambda x: x["usageCount"], reverse=True)
 
 
 @read_app.command("components-summary")

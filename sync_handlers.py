@@ -287,6 +287,113 @@ def sync_primitive_colors_normalized(
     raise typer.Exit(0)
 
 
+@sync_app.command("primitive-tokens")
+def sync_primitive_tokens(
+    type_key: str = typer.Argument(..., help=f"Primitive type to sync. One of: {', '.join(sorted(__import__('primitive_types').PRIMITIVE_TYPES.keys()))}."),
+    seed_file: str | None = typer.Option(
+        None,
+        "--seed-file",
+        help="Path to seed JSON. Defaults to tokens/<type>.seed.json.",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview changes without writing to Figma."),
+    verbose: bool = typer.Option(False, "--verbose", help="Print per-entry log."),
+    json_output: bool = typer.Option(False, "--json", help="Emit only machine-readable JSON; suppresses human output."),
+    debug: bool = typer.Option(False, "--debug", help="Show infrastructure logs on stderr."),
+    timeout: float = typer.Option(10.0, "--timeout"),
+    mount_timeout: float = typer.Option(30.0, "--mount-timeout"),
+    file_url: str | None = typer.Option(None, "-f", "--file"),
+    quiet: bool = typer.Option(False, "--quiet"),
+) -> None:
+    """Create or update primitive (non-color) token variables in Figma from a seed file."""
+    from primitive_types import PRIMITIVE_TYPES
+    from validate_primitives import validate_primitive_seed
+
+    set_quiet(quiet)
+    set_debug(debug)
+
+    if type_key not in PRIMITIVE_TYPES:
+        typer.echo(
+            f"ERROR: Unknown type '{type_key}'. Valid types: {', '.join(sorted(PRIMITIVE_TYPES.keys()))}",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    resolved_seed = Path(seed_file) if seed_file else _TOKENS_DIR / f"{type_key}.seed.json"
+    if not resolved_seed.exists():
+        typer.echo(f"ERROR: Seed file not found: {resolved_seed}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        entries = json.loads(resolved_seed.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        typer.echo(f"ERROR: Seed file is not valid JSON: {e}", err=True)
+        raise typer.Exit(1)
+
+    if not isinstance(entries, list):
+        typer.echo(f"ERROR: Seed file must be a JSON array, got {type(entries).__name__}", err=True)
+        raise typer.Exit(1)
+
+    errors = validate_primitive_seed(type_key, entries)
+    if errors:
+        typer.echo(
+            f"ERROR: Seed validation failed for '{type_key}' ({len(errors)} error(s)):\n"
+            + "\n".join(f"  {e}" for e in errors),
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    td = PRIMITIVE_TYPES[type_key]
+
+    _run_validation(timeout=timeout, mount_timeout=mount_timeout,
+                    file_url=file_url, quiet=quiet)
+
+    script_path = _SCRIPT_DIR / "sync_primitive_tokens.js"
+    if not script_path.exists():
+        typer.echo(f"ERROR: Script not found: {script_path}", err=True)
+        raise typer.Exit(1)
+
+    user_js = (script_path.read_text(encoding="utf-8")
+               .replace("__ENTRIES__", json.dumps(entries))
+               .replace("__FIGMA_TYPE__", json.dumps(td.figma_type))
+               .replace("__TYPE_KEY__", json.dumps(type_key))
+               .replace("__DRY_RUN__", "true" if dry_run else "false"))
+
+    result, ok_model = _dispatch_sync(user_js, timeout=timeout, mount_timeout=mount_timeout,
+                                       file_url=file_url, quiet=quiet)
+
+    if result.get("errored", 0) > 0:
+        typer.echo(
+            f"ERROR: {result['errored']} variable(s) failed to create. Check --verbose for details.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if json_output:
+        _emit_exit(ok_model, 0)
+
+    label = "Dry-run summary" if dry_run else "Sync summary"
+    typer.echo(f"\n{label} — {type_key} ({td.figma_type})")
+    typer.echo(f"  +{result.get('created', '?')} created"
+               f"  {result.get('skipped', '?')} skipped"
+               f"  ({result.get('total', len(entries))} total)")
+
+    log_entries = result.get("log", [])
+    if verbose and log_entries:
+        typer.echo("\nDetailed changes\n")
+        for e in sorted(log_entries, key=lambda x: x.get("name", "")):
+            action = e.get("action", "")
+            name = e.get("name", "?")
+            value = e.get("value", "")
+            if action in ("would-create", "created"):
+                typer.echo(f"  + {name:<45}  {value}")
+            elif action == "skipped":
+                typer.echo(f"  = {name:<45}  (skipped)")
+            elif action == "error":
+                typer.echo(f"  ! {name:<45}  ERROR: {e.get('error', '?')}")
+
+    raise typer.Exit(0)
+
+
 @sync_app.command("semantic-tokens")
 def sync_semantic_tokens(
     semantics_file: str = typer.Option(

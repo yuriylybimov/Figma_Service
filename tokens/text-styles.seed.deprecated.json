@@ -1,0 +1,7 @@
+{
+  "$deprecated": true,
+  "$reason": "Replaced by composable typography system in tokens/typography/",
+  "$replacedBy": "tokens/typography/text-styles.generated.json",
+  "$config": "tokens/typography/config.json",
+  "$deprecatedAt": "2026-04-26"
+}

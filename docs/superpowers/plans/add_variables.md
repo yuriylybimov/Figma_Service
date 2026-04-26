@@ -1,3 +1,12 @@
+# LEGACY EXECUTION FILE
+
+This file is deprecated and no longer used as a control layer.
+
+The system now uses:
+- seed files as source of truth
+- CLI commands for execution
+- pipeline: read → plan → seed → validate → sync
+
 # add_variables.md
 
 Read docs/superpowers/specs/variables_architecture.md before execution.

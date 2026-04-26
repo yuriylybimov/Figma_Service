@@ -1,0 +1,8 @@
+[
+  { "name": "radius/radius-0",    "value": 0    },
+  { "name": "radius/radius-4",    "value": 4    },
+  { "name": "radius/radius-8",    "value": 8    },
+  { "name": "radius/radius-12",   "value": 12   },
+  { "name": "radius/radius-100",  "value": 100  },
+  { "name": "radius/radius-full", "value": 9999 }
+]

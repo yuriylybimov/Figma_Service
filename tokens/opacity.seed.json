@@ -1,0 +1,9 @@
+[
+  { "name": "opacity/opacity-0",   "value": 0    },
+  { "name": "opacity/opacity-5",   "value": 0.05 },
+  { "name": "opacity/opacity-10",  "value": 0.1  },
+  { "name": "opacity/opacity-30",  "value": 0.3  },
+  { "name": "opacity/opacity-50",  "value": 0.5  },
+  { "name": "opacity/opacity-70",  "value": 0.7  },
+  { "name": "opacity/opacity-100", "value": 1    }
+]

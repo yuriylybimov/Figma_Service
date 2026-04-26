@@ -14,10 +14,16 @@ usage() {
   echo ""
   echo "Runs the full primitive color pipeline (dry-run sync only):"
   echo "  1. read color-usage-summary"
-  echo "  2. plan primitive-colors-from-project"
-  echo "  3. plan primitive-colors-normalized"
-  echo "  4. plan validate-normalized"
-  echo "  5. sync primitive-colors-normalized --dry-run --verbose"
+  echo "  2. read color-usage-detail"
+  echo "  3. plan primitive-colors-from-project"
+  echo "  4. plan cleanup-candidates"
+  echo "  5. plan deduplicate-primitives"
+  echo "  6. plan suggest-merge-overrides"
+  echo "  7. override apply-merge-proposal"
+  echo "  8. plan primitive-colors-normalized"
+  echo "  9. plan audit-palette"
+  echo " 10. plan validate-normalized"
+  echo " 11. sync primitive-colors-normalized --dry-run --verbose"
   echo ""
   echo "Options:"
   echo "  -f FIGMA_URL   Figma file URL (overrides FIGMA_FILE_URL env var)"
@@ -67,23 +73,53 @@ fi
 step 1 "read color-usage-summary"
 $RUN read color-usage-summary $FILE_FLAG --out "$TOKENS/color_usage_summary.json"
 
-step 2 "plan primitive-colors-from-project"
+step 2 "read color-usage-detail"
+$RUN read color-usage-detail $FILE_FLAG --out "$TOKENS/color_usage_detail.json"
+
+step 3 "plan primitive-colors-from-project"
 $RUN plan primitive-colors-from-project \
   --usage "$TOKENS/color_usage_summary.json" \
   --out   "$TOKENS/primitives.proposed.json"
 
-step 3 "plan primitive-colors-normalized"
+step 4 "plan cleanup-candidates"
+$RUN plan cleanup-candidates \
+  --proposed "$TOKENS/primitives.proposed.json" \
+  --detail   "$TOKENS/color_usage_detail.json" \
+  --out      "$TOKENS/primitives.cleanup.json"
+
+step 5 "plan deduplicate-primitives"
+$RUN plan deduplicate-primitives \
+  --cleanup "$TOKENS/primitives.cleanup.json" \
+  --out     "$TOKENS/primitives.dedup.json"
+
+step 6 "plan suggest-merge-overrides"
+$RUN plan suggest-merge-overrides \
+  --cleanup "$TOKENS/primitives.cleanup.json" \
+  --dedup   "$TOKENS/primitives.dedup.json" \
+  --out     "$TOKENS/overrides.merge.proposed.json"
+
+step 7 "override apply-merge-proposal"
+$RUN override apply-merge-proposal \
+  --proposal "$TOKENS/overrides.merge.proposed.json" \
+  --out      "$TOKENS/overrides.merge.json" \
+  --force
+
+step 8 "plan primitive-colors-normalized"
 $RUN plan primitive-colors-normalized \
   --proposed  "$TOKENS/primitives.proposed.json" \
   --overrides "$TOKENS/overrides.normalized.json" \
   --merge     "$TOKENS/overrides.merge.json" \
   --out       "$TOKENS/primitives.normalized.json"
 
-step 4 "plan validate-normalized"
+step 9 "plan audit-palette"
+$RUN plan audit-palette \
+  --normalized "$TOKENS/primitives.normalized.json"
+
+step 10 "plan validate-normalized"
 $RUN plan validate-normalized \
   --normalized "$TOKENS/primitives.normalized.json"
 
-step 5 "sync dry-run"
+step 11 "sync dry-run"
 [[ "$DRY_RUN_ONLY" == "true" ]] || { echo "ERROR: DRY_RUN_ONLY safety check failed. Aborting."; exit 1; }
 $RUN sync primitive-colors-normalized $FILE_FLAG \
   --normalized "$TOKENS/primitives.normalized.json" \
@@ -96,7 +132,12 @@ echo "  Pipeline complete (dry-run — no Figma writes)"
 echo "══════════════════════════════════════════════"
 echo "  Artifacts: $TOKENS/"
 echo "    color_usage_summary.json"
+echo "    color_usage_detail.json"
 echo "    primitives.proposed.json"
+echo "    primitives.cleanup.json"
+echo "    primitives.dedup.json"
+echo "    overrides.merge.proposed.json"
+echo "    overrides.merge.json"
 echo "    primitives.normalized.json"
 echo ""
 echo "  To apply changes to Figma, run manually:"

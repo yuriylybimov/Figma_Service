@@ -1,0 +1,8 @@
+[
+  { "name": "line-height/line-height-16", "value": 16 },
+  { "name": "line-height/line-height-20", "value": 20 },
+  { "name": "line-height/line-height-24", "value": 24 },
+  { "name": "line-height/line-height-28", "value": 28 },
+  { "name": "line-height/line-height-32", "value": 32 },
+  { "name": "line-height/line-height-36", "value": 36 }
+]

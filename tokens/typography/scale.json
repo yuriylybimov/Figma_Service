@@ -1,0 +1,16 @@
+{
+  "heading": {
+    "lg": { "fontSize": "font-size/font-size-32", "lineHeight": "line-height/line-height-36" },
+    "md": { "fontSize": "font-size/font-size-24", "lineHeight": "line-height/line-height-28" },
+    "sm": { "fontSize": "font-size/font-size-20", "lineHeight": "line-height/line-height-24" }
+  },
+  "body": {
+    "lg": { "fontSize": "font-size/font-size-16", "lineHeight": "line-height/line-height-20" },
+    "sm": { "fontSize": "font-size/font-size-14", "lineHeight": "line-height/line-height-20" }
+  },
+  "label": {
+    "lg": { "fontSize": "font-size/font-size-14", "lineHeight": "line-height/line-height-16" },
+    "sm": { "fontSize": "font-size/font-size-12", "lineHeight": "line-height/line-height-16" },
+    "xs": { "fontSize": "font-size/font-size-10", "lineHeight": "line-height/line-height-16" }
+  }
+}

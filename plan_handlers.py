@@ -936,3 +936,245 @@ def plan_semantic_sync_dry_run(
         for msg in errors:
             typer.echo(f"    {msg}")
         raise typer.Exit(1)
+
+
+@plan_app.command("suggest-primitive-seeds")
+def plan_suggest_primitive_seeds(
+    usage: str = typer.Option(..., "--usage", help="Path to raw usage JSON written by `read primitive-usage`."),
+    tokens_dir: str = typer.Option("tokens", "--tokens-dir", help="Directory where <type>.suggested.json files are written."),
+    quiet: bool = typer.Option(False, "--quiet", "-q"),
+) -> None:
+    """[EXPERIMENTAL] Suggest primitive seed entries from real Figma data.
+
+    Reads raw primitive usage (output of `read primitive-usage`) and writes
+    one tokens/<type>.suggested.json per type. Seed files are never modified.
+    Output is advisory only — review and copy selected entries manually.
+    """
+    from suggest_primitives import suggest_primitive_entries
+    from primitive_types import PRIMITIVE_TYPES
+
+    usage_path = Path(usage).resolve()
+    if not usage_path.exists():
+        typer.echo(f"ERROR: usage file not found: {usage_path}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        raw = json.loads(usage_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        typer.echo(f"ERROR: failed to read usage file: {e}", err=True)
+        raise typer.Exit(1)
+
+    out_dir = Path(tokens_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    written = 0
+    skipped = 0
+
+    for type_key in PRIMITIVE_TYPES:
+        entries = suggest_primitive_entries(type_key, raw)
+        if not entries:
+            skipped += 1
+            if not quiet:
+                typer.echo(f"  skip  {type_key} (no data)")
+            continue
+
+        out_path = out_dir / f"{type_key}.suggested.json"
+        out_path.write_text(
+            json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        written += 1
+        if not quiet:
+            typer.echo(f"  wrote {type_key}.suggested.json ({len(entries)} entries)")
+
+    typer.echo(f"\nDone. {written} suggestion file(s) written to {out_dir}, {skipped} type(s) had no data.")
+    typer.echo("Review the .suggested.json files. Copy selected entries (without use_count) into the seed files manually.")
+
+
+@plan_app.command("validate-primitives")
+def plan_validate_primitives(
+    type_key: str = typer.Argument(..., help="Token type: spacing, radius, font-size, etc."),
+    seed_file: str | None = typer.Option(None, "--seed-file", help="Path to seed JSON. Defaults to tokens/<type>.seed.json"),
+    quiet: bool = typer.Option(False, "--quiet", "-q"),
+) -> None:
+    """Validate a primitive token seed file."""
+    from validate_primitives import validate_primitive_seed
+
+    path = Path(seed_file) if seed_file else Path("tokens") / f"{type_key}.seed.json"
+    if not path.exists():
+        typer.echo(f"Seed file not found: {path}", err=True)
+        raise typer.Exit(1)
+
+    entries = json.loads(path.read_text())
+    errors = validate_primitive_seed(type_key, entries)
+
+    if errors:
+        for e in errors:
+            typer.echo(f"  ERROR: {e}")
+        raise typer.Exit(1)
+
+    if not quiet:
+        typer.echo(f"✓ {type_key} seed is valid ({len(entries)} entries)")
+
+
+@plan_app.command("validate-semantic-primitives")
+def plan_validate_semantic_primitives(
+    semantic_file: str | None = typer.Option(None, "--semantic-file"),
+    tokens_dir: str = typer.Option("tokens", "--tokens-dir"),
+    quiet: bool = typer.Option(False, "--quiet", "-q"),
+) -> None:
+    """Validate the semantic primitive seed file against all loaded primitive seeds."""
+    from validate_semantic_primitives import validate_semantic_primitives
+    from primitive_types import PRIMITIVE_TYPES
+
+    tokens_path = Path(tokens_dir)
+    sem_path = Path(semantic_file) if semantic_file else tokens_path / "primitives-semantic.seed.json"
+
+    if not sem_path.exists():
+        typer.echo(f"Semantic seed file not found: {sem_path}", err=True)
+        raise typer.Exit(1)
+
+    semantic = json.loads(sem_path.read_text())
+
+    # Load all primitive seeds present in tokens_dir
+    primitive_seeds: dict[str, list[dict]] = {}
+    for type_key in PRIMITIVE_TYPES:
+        seed_path = tokens_path / f"{type_key}.seed.json"
+        if seed_path.exists():
+            primitive_seeds[type_key] = json.loads(seed_path.read_text())
+
+    errors = validate_semantic_primitives(semantic, primitive_seeds)
+    if errors:
+        for e in errors:
+            typer.echo(f"  ERROR: {e}")
+        raise typer.Exit(1)
+
+    if not quiet:
+        typer.echo(f"✓ Semantic primitives valid ({len(semantic)} entries)")
+
+
+@plan_app.command("generate-text-styles")
+def plan_generate_text_styles(
+    config_file: str = typer.Option("tokens/typography/config.json", "--config"),
+    scale_file: str = typer.Option("tokens/typography/scale.json", "--scale"),
+    tokens_dir: str = typer.Option("tokens", "--tokens-dir"),
+    out_file: str = typer.Option("tokens/typography/text-styles.generated.json", "--out"),
+    quiet: bool = typer.Option(False, "--quiet", "-q"),
+) -> None:
+    """Generate text-styles.generated.json from config.json + scale.json + primitive seeds."""
+    config = json.loads(Path(config_file).read_text())
+    scale = json.loads(Path(scale_file).read_text())
+
+    shared = config["shared"]
+    weights = config["weights"]
+    roles = config["roles"]
+
+    styles = []
+    for role, sizes in roles.items():
+        for size in sizes:
+            scale_entry = scale.get(role, {}).get(size)
+            if scale_entry is None:
+                typer.echo(f"ERROR: scale missing entry for {role}/{size}", err=True)
+                raise typer.Exit(1)
+            for weight in weights:
+                style = {
+                    "name": f"typography/{role}/{size}/{weight}",
+                    "fontFamily": shared["fontFamily"],
+                    "fontSize": scale_entry["fontSize"],
+                    "fontWeight": f"font-weight/font-weight-{weight}",
+                    "lineHeight": scale_entry["lineHeight"],
+                    "letterSpacing": shared["letterSpacing"],
+                }
+                styles.append(style)
+
+    output = {
+        "$schema": "composable-typography/v1",
+        "$generated": True,
+        "$source": [config_file, scale_file],
+        "$deprecated": ["tokens/text-styles.seed.json"],
+        "styles": styles,
+    }
+
+    out_path = Path(out_file)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n")
+
+    if not quiet:
+        typer.echo(f"✓ Generated {len(styles)} text styles → {out_file}")
+
+
+# Token-ref prefix required for each field in a text style entry.
+_TOKEN_REF_PREFIXES: dict[str, str] = {
+    "fontFamily": "font-family/",
+    "fontSize": "font-size/",
+    "fontWeight": "font-weight/",
+    "lineHeight": "line-height/",
+    "letterSpacing": "letter-spacing/",
+}
+
+_EXPECTED_STYLES = 24
+
+
+def _validate_text_styles_data(data: dict) -> list[str]:
+    """Pure validator — returns a list of error strings (empty = valid)."""
+    issues: list[str] = []
+
+    if not data.get("$generated"):
+        issues.append('$generated must be true')
+        return issues  # fail-fast: rest of checks require valid structure
+
+    styles = data.get("styles", [])
+
+    if len(styles) != _EXPECTED_STYLES:
+        issues.append(f'styles count is {len(styles)}, expected {_EXPECTED_STYLES}')
+        return issues
+
+    seen_names: set[str] = set()
+    for style in styles:
+        name = style.get("name", "")
+
+        # name format: typography/{role}/{size}/{weight}
+        parts = name.split("/")
+        if len(parts) != 4 or parts[0] != "typography":
+            issues.append(f'invalid name format: "{name}" (expected typography/{{role}}/{{size}}/{{weight}})')
+
+        if name in seen_names:
+            issues.append(f'duplicate name: "{name}"')
+        seen_names.add(name)
+
+        for field, expected_prefix in _TOKEN_REF_PREFIXES.items():
+            value = style.get(field)
+            if not isinstance(value, str):
+                issues.append(f'"{name}": {field} is a raw {type(value).__name__} — must be a token ref')
+            elif not value.startswith(expected_prefix):
+                issues.append(f'"{name}": {field} "{value}" must start with "{expected_prefix}"')
+
+    return issues
+
+
+@plan_app.command("validate-text-styles")
+def plan_validate_text_styles(
+    file: str = typer.Option(
+        "tokens/typography/text-styles.generated.json",
+        "--file",
+        help="Path to text-styles.generated.json",
+    ),
+    quiet: bool = typer.Option(False, "--quiet", "-q"),
+) -> None:
+    """Validate tokens/typography/text-styles.generated.json for correctness."""
+    path = Path(file)
+    if not path.exists():
+        typer.echo(f"ERROR: file not found: {path}")
+        raise typer.Exit(1)
+
+    data = json.loads(path.read_text())
+    issues = _validate_text_styles_data(data)
+
+    if issues:
+        for issue in issues:
+            typer.echo(f"  FAIL: {issue}")
+        raise typer.Exit(1)
+
+    if not quiet:
+        styles = data.get("styles", [])
+        typer.echo(f"✓ PASS — {len(styles)} text styles valid, all values are token refs, no duplicates")

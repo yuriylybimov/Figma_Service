@@ -10,5 +10,14 @@ __pycache__/
 tokens/primitives.json
 tokens/primitives.normalized.json
 tokens/primitives.proposed.json
+tokens/*contextual.json
+tokens/*suggested.json
+tokens/color_usage_*
+tokens/overrides.*
+tokens/primitives.cleanup.json
+tokens/primitives.dedup.json
+tokens/typography/text-styles.generated.json
+tokens/typography/text-styles.generated.json
+tokens/text-styles.seed.json
 # tmp outputs
 /tmp/

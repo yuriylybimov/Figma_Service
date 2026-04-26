@@ -1,0 +1,5 @@
+[
+  { "name": "font-weight/font-weight-regular", "value": 400 },
+  { "name": "font-weight/font-weight-medium", "value": 500 },
+  { "name": "font-weight/font-weight-semibold", "value": 600 }
+]

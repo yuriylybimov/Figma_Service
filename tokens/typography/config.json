@@ -1,0 +1,12 @@
+{
+  "roles": {
+    "heading": ["lg", "md", "sm"],
+    "body": ["lg", "sm"],
+    "label": ["lg", "sm", "xs"]
+  },
+  "weights": ["regular", "medium", "semibold"],
+  "shared": {
+    "fontFamily": "font-family/font-family-sans-primary",
+    "letterSpacing": "letter-spacing/tracking-0"
+  }
+}
